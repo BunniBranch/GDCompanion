@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <Authors>BunniBranch</Authors>
+    <Company>BunniBranch</Company>
+    <Copyright>Copyright (C) 2026 BunniBranch and contributors</Copyright>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+</Project>

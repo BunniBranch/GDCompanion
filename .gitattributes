@@ -1,0 +1,28 @@
+# Defense in depth for git archive / GitHub source downloads.
+/src/GrimDawnCompanion.App/Data/** export-ignore
+**/catalog.json export-ignore
+/catalog_work/** export-ignore
+/.catalog_work/** export-ignore
+/research/** export-ignore
+/researchbase/** export-ignore
+/.research/** export-ignore
+/.researchbase/** export-ignore
+/.tmp/** export-ignore
+/tmp/** export-ignore
+/output/** export-ignore
+/build/** export-ignore
+/build_native/** export-ignore
+/build_test/** export-ignore
+/.tools/** export-ignore
+/.dotnet-home/** export-ignore
+*.arz export-ignore
+*.arc export-ignore
+*.dbr export-ignore
+*.gdc export-ignore
+*.gst export-ignore
+*.gsh export-ignore
+
+# Keep local historical docs out of source downloads, even if tracked later.
+/docs/* export-ignore
+/docs/user-guide.md -export-ignore
+/docs/developer-guide.md -export-ignore

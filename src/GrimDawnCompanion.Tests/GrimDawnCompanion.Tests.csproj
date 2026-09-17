@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="..\GrimDawnCompanion.Core\GrimDawnCompanion.Core.csproj" /></ItemGroup>
+  <ItemGroup><Compile Include="..\GrimDawnCompanion.App\AppVersion.cs" Link="AppVersion.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="..\GrimDawnCompanion.App\MainViewModel.cs" Link="MainViewModel.cs" /></ItemGroup>
+  <ItemGroup><Using Include="System.IO" /></ItemGroup>
+</Project>

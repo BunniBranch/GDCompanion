@@ -1,0 +1,48 @@
+# Local build output and toolchains
+**/bin/
+**/obj/
+/build/
+/build_native/
+/build_native-*/
+/build_test/
+/.tools/
+/.dotnet-home/
+/.vs/
+*.user
+*.suo
+
+# Generated game data, local research, reference checkouts and test artifacts.
+# Keep these locally; do not distribute them in the public repository.
+/src/GrimDawnCompanion.App/Data/
+**/catalog.json
+**/catalog.json.new
+/.catalog_work/
+/catalog_work/
+/.research/
+/.researchbase/
+/research/
+/researchbase/
+/.tmp/
+/tmp/
+/output/
+/devotion_raw_*.json
+*.arz
+*.arc
+*.dbr
+*.gdc
+*.gst
+*.gsh
+*.dmp
+*.log
+
+# Local secrets / signing credentials (public certificates can be reviewed separately)
+.env
+.env.*
+*.pfx
+*.p12
+*.key
+
+# Publish only the current guides. Historical notes and drafts stay local.
+/docs/*
+!/docs/user-guide.md
+!/docs/developer-guide.md
