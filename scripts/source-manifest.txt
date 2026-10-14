@@ -42,6 +42,7 @@ src/GrimDawnBridge/README.md
 src/GrimDawnBridge/RadarCanvas.h
 src/GrimDawnBridge/RadarCanvasState.h
 src/GrimDawnBridge/RadarCanvasStateTests.cpp
+src/GrimDawnBridge/SupportedBuilds.h
 src/GrimDawnCompanion.App/App.xaml
 src/GrimDawnCompanion.App/App.xaml.cs
 src/GrimDawnCompanion.App/AppVersion.cs

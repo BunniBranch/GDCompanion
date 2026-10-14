@@ -472,14 +472,20 @@ var assistNativeSource = File.ReadAllText(Path.Combine(root, "src", "GrimDawnBri
 var gameExports = new PeExportReader(game.GameDllPath);
 var assistHookMatches = System.Text.RegularExpressions.Regex.Matches(assistNativeSource,
     "\\{ \\\"([^\\\"]+)\\\", reinterpret_cast<void\\*>.*?, (0x[0-9A-Fa-f]+), (0x[0-9A-Fa-f]+) \\}");
-Require(assistHookMatches.Count == 4, "all four assist hooks have explicit code fingerprints");
-foreach (System.Text.RegularExpressions.Match hook in assistHookMatches)
+Require(assistHookMatches.Count >= 8 && assistHookMatches.Cast<System.Text.RegularExpressions.Match>()
+        .GroupBy(hook => hook.Groups[1].Value, StringComparer.Ordinal)
+        .All(group => group.Count() >= 2),
+    "all four assist hooks have explicit fingerprints for every supported game build");
+foreach (var hooks in assistHookMatches.Cast<System.Text.RegularExpressions.Match>()
+             .GroupBy(hook => hook.Groups[1].Value, StringComparer.Ordinal))
 {
-    var export = gameExports.Find(hook.Groups[1].Value);
+    var export = gameExports.Find(hooks.Key);
     uint hash = 2166136261;
     if (export is not null) foreach (var value in export.Prologue.Take(32)) hash = unchecked((hash ^ value) * 16777619);
-    Require(export is { IsExecutable: true } && export.Rva == Convert.ToUInt32(hook.Groups[2].Value[2..], 16) &&
-        hash == Convert.ToUInt32(hook.Groups[3].Value[2..], 16), "assist hook fingerprint matches installed game without executing game code");
+    Require(export is { IsExecutable: true } && hooks.Any(hook =>
+            export.Rva == Convert.ToUInt32(hook.Groups[2].Value[2..], 16) &&
+            hash == Convert.ToUInt32(hook.Groups[3].Value[2..], 16)),
+        "assist hook fingerprint matches installed game without executing game code");
 }
 await using (var assistCapabilityClient = new GameBridgeClient())
 {

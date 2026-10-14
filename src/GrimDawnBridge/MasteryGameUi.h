@@ -1,4 +1,5 @@
 #pragma once
+#include "SupportedBuilds.h"
 
 // Build-pinned adapter for the game's devotion-reset and Undo Class UI paths.
 // All calls/reads run on the existing game-thread queue, under its SEH guard.
@@ -26,6 +27,9 @@ namespace MasteryGameUi
     inline ReadPointer autoCast = nullptr;
     inline ReadUnsigned rank = nullptr, experience = nullptr, devotionLevel = nullptr, parent = nullptr;
     inline unsigned char* executable = nullptr;
+    inline size_t uiVtableRva = 0, skillWindowVtableRva = 0, devotionVtableRva = 0;
+    inline size_t selectedPaneVtableRva = 0, emptyPaneVtableRva = 0;
+    inline size_t resetRva = 0, setPaneRva = 0;
     inline bool available = false;
 
     template<typename T> T Field(void* object, size_t offset)
@@ -60,12 +64,29 @@ namespace MasteryGameUi
         {
             const auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(executable);
             const auto pe = reinterpret_cast<IMAGE_NT_HEADERS64*>(executable + dos->e_lfanew);
-            available = getUi && rank && experience && devotionLevel && parent && autoCast &&
-                dos->e_magic == IMAGE_DOS_SIGNATURE && pe->Signature == IMAGE_NT_SIGNATURE &&
-                pe->FileHeader.TimeDateStamp == 0x6A85FBEC && pe->OptionalHeader.SizeOfImage == 0x482000 &&
+            const auto build = SupportedBuilds::Executable(reinterpret_cast<HMODULE>(executable));
+            if (build == SupportedBuilds::Build::V1308 &&
                 Fingerprint(0x18C9D0, 0x451, 0x696D9AB0E6A06162ULL) &&
                 Fingerprint(0x27C580, 0x161, 0x4D8A99E12F71E8A5ULL) &&
-                Fingerprint(0x21B060, 0xC, 0xE769D51242C91AF2ULL);
+                Fingerprint(0x21B060, 0xC, 0xE769D51242C91AF2ULL))
+            {
+                uiVtableRva = 0x31A680; skillWindowVtableRva = 0x31D8A8; devotionVtableRva = 0x315D80;
+                selectedPaneVtableRva = 0x31BD18; emptyPaneVtableRva = 0x31A1D8;
+                resetRva = 0x21B060; setPaneRva = 0x27C580;
+            }
+            else if (build == SupportedBuilds::Build::V1311 &&
+                Fingerprint(0x18CB40, 0x451, 0x41B5985FF44476FFULL) &&
+                Fingerprint(0x27C720, 0x161, 0xA045AC06411D9023ULL) &&
+                Fingerprint(0x21B1F0, 0xC, 0xE2231407770620D2ULL))
+            {
+                uiVtableRva = 0x31A5B0; skillWindowVtableRva = 0x31D8E8; devotionVtableRva = 0x315DC8;
+                selectedPaneVtableRva = 0x31BD48; emptyPaneVtableRva = 0x31A220;
+                resetRva = 0x21B1F0; setPaneRva = 0x27C720;
+            }
+            available = getUi && rank && experience && devotionLevel && parent && autoCast &&
+                dos->e_magic == IMAGE_DOS_SIGNATURE && pe->Signature == IMAGE_NT_SIGNATURE &&
+                uiVtableRva && skillWindowVtableRva && devotionVtableRva && selectedPaneVtableRva &&
+                emptyPaneVtableRva && resetRva && setPaneRva;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { available = false; }
     }
@@ -75,11 +96,11 @@ namespace MasteryGameUi
         out = {};
         if (!available) return "UNSUPPORTED_GAME_UI_BUILD";
         out.ui = getUi(engine);
-        if (!Vtable(out.ui, 0x31A680) || Field<void*>(Field<void*>(out.ui, 0), 0xE8) != executable + 0x21B060)
+        if (!Vtable(out.ui, uiVtableRva) || Field<void*>(Field<void*>(out.ui, 0), 0xE8) != executable + resetRva)
             return "UNEXPECTED_GAME_UI";
         out.window = At(out.ui, 0x3FB88);
         auto devotion = At(out.ui, 0x81308);
-        if (!Vtable(out.window, 0x31D8A8) || !Vtable(devotion, 0x315D80) ||
+        if (!Vtable(out.window, skillWindowVtableRva) || !Vtable(devotion, devotionVtableRva) ||
             Field<unsigned int>(out.window, 0x98) != playerId || Field<unsigned int>(devotion, 0x2410) != playerId)
             return "OPEN_SKILLS_AND_DEVOTION_FOR_CURRENT_PLAYER_FIRST";
         if (Field<unsigned char>(devotion, 0x2419) || Field<int>(out.window, 0x263C) != -1)
@@ -88,8 +109,8 @@ namespace MasteryGameUi
         {
             auto pane = out.panes[i] = Field<void*>(out.window, 0x100 + 8 * i);
             if (!pane) continue; // A locked/not-yet-created slot is not selected.
-            const bool selected = Vtable(pane, 0x31BD18);
-            if ((!selected && !Vtable(pane, 0x31A1D8)) || Field<unsigned int>(pane, 0x38) != playerId ||
+            const bool selected = Vtable(pane, selectedPaneVtableRva);
+            if ((!selected && !Vtable(pane, emptyPaneVtableRva)) || Field<unsigned int>(pane, 0x38) != playerId ||
                 Field<int>(pane, 0x48) != static_cast<int>(i) || Field<void*>(pane, 0x50) != out.window ||
                 Field<unsigned char>(pane, 0x60)) return "UNEXPECTED_CLASS_SLOT_STATE";
             if (selected && Field<unsigned char>(pane, 0x1E4D)) return "SKILL_UI_BUSY";
@@ -161,20 +182,20 @@ namespace MasteryGameUi
         // GameUIInterface::reset devotion (also used by the game's reset item).
         // It clears star ranks/bindings/affinities and refunds points itself.
         using Reset = void(__fastcall*)(void*);
-        reinterpret_cast<Reset>(executable + 0x21B060)(state.ui);
+        reinterpret_cast<Reset>(executable + resetRva)(state.ui);
     }
     inline bool ClearClasses(const State& state)
     {
         // Same pane replacement as Undo Class. Called only AFTER rank/refund
         // verification. Game owns deferred disposal of the old UI panes.
         using SetPane = void(__fastcall*)(void*, int, int);
-        auto setPane = reinterpret_cast<SetPane>(executable + 0x27C580);
+        auto setPane = reinterpret_cast<SetPane>(executable + setPaneRva);
         for (int i = 0; i < 2; ++i)
         {
             auto pane = Field<void*>(state.window, 0x100 + 8 * i);
-            if (Vtable(pane, 0x31BD18)) setPane(state.window, i, 0x50);
+            if (Vtable(pane, selectedPaneVtableRva)) setPane(state.window, i, 0x50);
             pane = Field<void*>(state.window, 0x100 + 8 * i);
-            if (pane && !Vtable(pane, 0x31A1D8)) return false;
+            if (pane && !Vtable(pane, emptyPaneVtableRva)) return false;
         }
         return true;
     }

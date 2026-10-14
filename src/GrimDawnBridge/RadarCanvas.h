@@ -1,4 +1,5 @@
 #pragma once
+#include "SupportedBuilds.h"
 #include "RadarCanvasState.h"
 #include <algorithm>
 
@@ -113,10 +114,7 @@ namespace RadarCanvas
     }
     inline void Initialize(HMODULE engine)
     {
-        const auto base = reinterpret_cast<const unsigned char*>(engine);
-        const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        const auto pe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-        if (!MinimapProjection::available || pe->FileHeader.TimeDateStamp != 0x6A85FB5B || pe->OptionalHeader.SizeOfImage != 0x450000) return;
+        if (!MinimapProjection::available || SupportedBuilds::Engine(engine) == SupportedBuilds::Build::Unknown) return;
         fan = reinterpret_cast<FanFn>(GetProcAddress(engine, "?RenderTriFan@GraphicsCanvas@GAME@@QEAAXAEBV?$vector@VVec2@GAME@@@mem@@AEBVColor@2@@Z"));
         rectangle = reinterpret_cast<RectFn>(GetProcAddress(engine, "?RenderRect@GraphicsCanvas@GAME@@QEAAXAEBVRect@2@AEBVColor@2@@Z"));
         text = reinterpret_cast<TextFn>(GetProcAddress(engine, "?RenderColoredText2d@GraphicsCanvas@GAME@@QEAAXHHAEBV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@4@AEBVColor@2@W4FontLayout@2@@Z"));

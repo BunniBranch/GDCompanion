@@ -1,4 +1,5 @@
 #pragma once
+#include "SupportedBuilds.h"
 #include "GameplayAssistState.h"
 
 namespace GameplayAssists
@@ -159,9 +160,8 @@ namespace GameplayAssists
     inline void Initialize(HMODULE game, LocalPlayer player, void** instance)
     {
         localPlayer = player; gameInstance = instance;
-        auto bytes = reinterpret_cast<unsigned char*>(game);
-        auto pe = reinterpret_cast<IMAGE_NT_HEADERS64*>(bytes + reinterpret_cast<IMAGE_DOS_HEADER*>(bytes)->e_lfanew);
-        if (pe->FileHeader.TimeDateStamp != 0x6A85FBB3 || pe->OptionalHeader.SizeOfImage != 0xAB5000 ||
+        const auto build = SupportedBuilds::Game(game);
+        if (build == SupportedBuilds::Build::Unknown ||
             !MasteryAudit::available || !MasteryRespec::engineInstance || !MasteryRespec::gameInfo ||
             !MasteryRespec::singlePlayer || !MasteryRespec::alive) return;
         using MasteryAudit::Bind;
@@ -175,12 +175,19 @@ namespace GameplayAssists
         Bind(forceSpeed, game, "?ForceSpeedUpdate@Character@GAME@@QEAAXXZ");
         if (!setMana || !manaLimit || !manaReserve || !currentMana || !skillOwner || !endCooldown || !refreshCooldown || !forceSpeed) return;
         struct Hook { const char* symbol; void* replacement; void** original; unsigned rva; uint32_t hash; };
-        const Hook hooks[] = {
+        const Hook oldHooks[] = {
             { "?IsInvincible@Player@GAME@@UEBA_NXZ", reinterpret_cast<void*>(&InvincibleHook), reinterpret_cast<void**>(&originalInvincible), 0x3BA2B0, 0x7278700C },
             { "?GetRunSpeed@Character@GAME@@QEAA?BM_N@Z", reinterpret_cast<void*>(&SpeedHook), reinterpret_cast<void**>(&originalSpeed), 0x68EE0, 0xE269847B },
             { "?StartCooldown@Skill@GAME@@QEAAX_N@Z", reinterpret_cast<void*>(&StartHook), reinterpret_cast<void**>(&originalStart), 0x47CBF0, 0xF14F8020 },
             { "?SubtractMana@Character@GAME@@QEAAXM@Z", reinterpret_cast<void*>(&SubtractHook), reinterpret_cast<void**>(&originalSubtract), 0x68A40, 0xDF88BBF1 }
         };
+        const Hook currentHooks[] = {
+            { "?IsInvincible@Player@GAME@@UEBA_NXZ", reinterpret_cast<void*>(&InvincibleHook), reinterpret_cast<void**>(&originalInvincible), 0x3CE800, 0x4B72C206 },
+            { "?GetRunSpeed@Character@GAME@@QEAA?BM_N@Z", reinterpret_cast<void*>(&SpeedHook), reinterpret_cast<void**>(&originalSpeed), 0x69040, 0xE269847B },
+            { "?StartCooldown@Skill@GAME@@QEAAX_N@Z", reinterpret_cast<void*>(&StartHook), reinterpret_cast<void**>(&originalStart), 0x4916B0, 0xF14F8020 },
+            { "?SubtractMana@Character@GAME@@QEAAXM@Z", reinterpret_cast<void*>(&SubtractHook), reinterpret_cast<void**>(&originalSubtract), 0x68BA0, 0xDF88BBF1 }
+        };
+        const Hook* hooks = build == SupportedBuilds::Build::V1311 ? currentHooks : oldHooks;
         void* targets[4]{};
         for (unsigned i = 0; i < 4; ++i)
         {

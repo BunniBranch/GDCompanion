@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $source = Join-Path $root 'src'
-$destination = Join-Path $root "build\GDCompanion-2.3.91$DestinationSuffix"
+$destination = Join-Path $root "build\GDCompanion-2.3.92$DestinationSuffix"
 $nativeBuild = Join-Path $root "build_native$DestinationSuffix"
 $dotnet = Join-Path $root '.tools\dotnet-sdk\dotnet.exe'
 if (-not (Test-Path -LiteralPath $dotnet)) { $dotnet = (Get-Command dotnet).Source }
@@ -105,10 +105,10 @@ foreach ($notice in 'LICENSE','COPYRIGHT.md','THIRD-PARTY-NOTICES.md','MINHOOK-L
     if (-not (Test-Path -LiteralPath (Join-Path $destination $notice))) { throw "Missing release notice: $notice" }
 }
 
-$sourceZip = Join-Path $root 'build\GDCompanion-v2.3.91-source.zip'
+$sourceZip = Join-Path $root 'build\GDCompanion-v2.3.92-source.zip'
 & (Join-Path $PSScriptRoot 'package-source.ps1') -DestinationZip $sourceZip
 
-$zip = Join-Path $root 'build\GDCompanion-v2.3.91-win-x64.zip'
+$zip = Join-Path $root 'build\GDCompanion-v2.3.92-win-x64.zip'
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path (Join-Path $destination '*') -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Build ready: $destination"

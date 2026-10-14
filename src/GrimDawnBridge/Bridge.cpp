@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include "SupportedBuilds.h"
 #include "MinimapTelemetry.h"
 #include "MasteryAudit.h"
 #include "MasteryRespec.h"
@@ -1241,11 +1242,8 @@ namespace
         g_questTracked = Resolve<bool(*)(void*)>(game, "?IsTracked@Quest2@GAME@@QEBA_NXZ");
         // Semantics and ABI audited against this game image; unknown versions
         // retain nearby native stars instead of guessing task states.
-        const auto gameBase = reinterpret_cast<const unsigned char*>(game);
-        const auto gameDos = reinterpret_cast<const IMAGE_DOS_HEADER*>(gameBase);
-        const auto gamePe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(gameBase + gameDos->e_lfanew);
         g_questTasksAvailable = g_questRepository && g_questTracked && g_getQuestFileName && g_getNumTasks && g_getTaskByIndex && g_getTaskUid && g_taskInProgress &&
-            gamePe->FileHeader.TimeDateStamp == 0x6A85FBB3 && gamePe->OptionalHeader.SizeOfImage == 0xAB5000;
+            SupportedBuilds::Game(game) != SupportedBuilds::Build::Unknown;
         const bool common = g_gameEngine && g_getMainPlayer;
         if (common)
         {

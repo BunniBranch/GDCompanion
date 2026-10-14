@@ -1,4 +1,5 @@
 #pragma once
+#include "SupportedBuilds.h"
 #include "CharacterResourceState.h"
 
 namespace CharacterResource
@@ -56,12 +57,10 @@ namespace CharacterResource
         Bind(expansionLoaded[1],engine,"?IsExpansion2Loaded@Engine@GAME@@QEBA_NXZ");
         Bind(expansionLoaded[2],engine,"?IsExpansion3Loaded@Engine@GAME@@QEBA_NXZ");
         Bind(modName,engine,"?GetModName@GameInfo@GAME@@QEBAAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ");
-        auto base=reinterpret_cast<const unsigned char*>(game);
-        auto pe=reinterpret_cast<const IMAGE_NT_HEADERS64*>(base+reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
         available=MasteryRespec::available && objectManager && getTable && tableInt && tableArrayInt && binaryTableVtable && customDatabase && money && attribute && attributeSpent && addMoney && subtractMoney &&
             changeSkill && changeAttribute && addDevotion && removeDevotion && addEarned && removeEarned && modName &&
             expansionLoaded[0] && expansionLoaded[1] && expansionLoaded[2] &&
-            pe->FileHeader.TimeDateStamp==0x6A85FBB3 && pe->OptionalHeader.SizeOfImage==0xAB5000;
+            SupportedBuilds::Game(game) != SupportedBuilds::Build::Unknown;
     }
     inline const char* ReadProgression(void* player, Snapshot& s)
     {

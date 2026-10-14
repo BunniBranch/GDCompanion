@@ -1,4 +1,5 @@
 #pragma once
+#include "SupportedBuilds.h"
 
 // Read-only observer of the supported executable's minimap render. Project
 // three local reference points through the same camera/viewport as native POIs.
@@ -13,6 +14,8 @@ namespace MinimapProjection
     inline WorldCtorFn worldCtor = nullptr;
     inline WorldPositionFn worldPosition = nullptr;
     inline unsigned char* executable = nullptr;
+    inline size_t renderRva = 0;
+    inline size_t mapVtableRva = 0;
     inline bool available = false;
     inline thread_local void* currentMap = nullptr;
     inline thread_local const float* currentOffset = nullptr;
@@ -49,15 +52,27 @@ namespace MinimapProjection
         {
             const auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(executable);
             const auto pe = reinterpret_cast<IMAGE_NT_HEADERS64*>(executable + dos->e_lfanew);
-            supported = project && worldCtor && worldPosition && dos->e_magic == IMAGE_DOS_SIGNATURE &&
-                pe->Signature == IMAGE_NT_SIGNATURE && pe->FileHeader.TimeDateStamp == 0x6A85FBEC &&
-                pe->OptionalHeader.SizeOfImage == 0x482000 &&
+            const auto build = SupportedBuilds::Executable(reinterpret_cast<HMODULE>(executable));
+            if (build == SupportedBuilds::Build::V1308 &&
                 Fingerprint(0x176830, 0x410, 0x4CD9847DCA67E0CEULL) &&
-                Fingerprint(0x175B90, 0x470, 0x5E3EA46E4EE07C7DULL);
+                Fingerprint(0x175B90, 0x470, 0x5E3EA46E4EE07C7DULL))
+            {
+                renderRva = 0x176830;
+                mapVtableRva = 0x3159A0;
+            }
+            else if (build == SupportedBuilds::Build::V1311 &&
+                Fingerprint(0x1769A0, 0x410, 0xD5B40342BE9C44E8ULL) &&
+                Fingerprint(0x175D00, 0x470, 0x3320F5C2728F21E0ULL))
+            {
+                renderRva = 0x1769A0;
+                mapVtableRva = 0x3159E0;
+            }
+            supported = project && worldCtor && worldPosition && renderRva && mapVtableRva &&
+                dos->e_magic == IMAGE_DOS_SIGNATURE && pe->Signature == IMAGE_NT_SIGNATURE;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { supported = false; }
         if (!supported) return;
-        auto target = executable + 0x176830;
+        auto target = executable + renderRva;
         if (MH_CreateHook(target, reinterpret_cast<void*>(&RenderHook), reinterpret_cast<void**>(&originalRender)) != MH_OK) return;
         if (MH_EnableHook(target) == MH_OK) available = true;
         else MH_RemoveHook(target);
@@ -70,7 +85,7 @@ namespace MinimapProjection
         __try
         {
             const auto map = static_cast<const unsigned char*>(currentMap);
-            if (Field<void*>(map, 0) != executable + 0x3159A0 || !Field<unsigned char>(map, 0x161) ||
+            if (Field<void*>(map, 0) != executable + mapVtableRva || !Field<unsigned char>(map, 0x161) ||
                 Field<int>(map, 0x38) == 2) return false; // The native render skips mode 2 (closed).
             auto region = Field<void*>(map, 0x1C0);
             auto camera = map + 0x170;

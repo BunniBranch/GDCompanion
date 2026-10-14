@@ -1,4 +1,5 @@
 #pragma once
+#include "SupportedBuilds.h"
 #include "CharacterLevelState.h"
 
 namespace CharacterLevel
@@ -20,10 +21,8 @@ namespace CharacterLevel
         MasteryAudit::Bind(attributePoints, game, "?GetModifierPoints@Character@GAME@@QEBA?BIXZ");
         MasteryAudit::Bind(totalAttribute, game, "?GetTotalCharAttribute@Character@GAME@@QEBAMW4CharAttributeType@2@@Z");
         MasteryAudit::Bind(increment, game, "?IncrementCharLevel@Character@GAME@@QEAAXXZ");
-        auto base = reinterpret_cast<const unsigned char*>(game);
-        auto pe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
         available = MasteryRespec::available && xp && nextXp && attributePoints && totalAttribute && increment &&
-            pe->FileHeader.TimeDateStamp == 0x6A85FBB3 && pe->OptionalHeader.SizeOfImage == 0xAB5000;
+            SupportedBuilds::Game(game) != SupportedBuilds::Build::Unknown;
     }
     inline const char* Read(void* game, void* player, Snapshot& value)
     {

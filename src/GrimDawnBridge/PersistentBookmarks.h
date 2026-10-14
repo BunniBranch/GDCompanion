@@ -1,4 +1,5 @@
 #pragma once
+#include "SupportedBuilds.h"
 #include <sstream>
 #include <locale>
 #include <algorithm>
@@ -44,13 +45,6 @@ namespace PersistentBookmarks
     inline Teleport teleport = nullptr;
     inline bool available = false;
 
-    inline bool KnownImage(HMODULE module, DWORD timestamp, DWORD imageSize)
-    {
-        auto bytes = reinterpret_cast<unsigned char*>(module);
-        auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(bytes);
-        auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(bytes + dos->e_lfanew);
-        return nt->FileHeader.TimeDateStamp == timestamp && nt->OptionalHeader.SizeOfImage == imageSize;
-    }
     inline void Initialize(HMODULE engine, HMODULE game)
     {
         using MasteryAudit::Bind;
@@ -79,7 +73,7 @@ namespace PersistentBookmarks
         Bind(localize, engine, "?LocalizeWithoutParams@LocalizationManager@GAME@@QEAAPEBGPEBD@Z");
         // WorldCoords layout and Region world/origin offsets
         // were checked against these installed binaries. Fail closed on patches.
-        available = KnownImage(engine, 0x6A85FB5B, 0x450000) && KnownImage(game, 0x6A85FBB3, 0xAB5000) &&
+        available = SupportedBuilds::Matching(engine, game) &&
             MasteryAudit::available && MasteryRespec::engineInstance && MasteryRespec::gameInfo &&
             MasteryRespec::singlePlayer && MasteryRespec::alive && MasteryRespec::attacked &&
             hardcore && difficulty && teleporting && mode && modName && coords && regionAt && convert &&
