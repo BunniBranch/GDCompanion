@@ -7,7 +7,7 @@ public sealed class CompatibilityService
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly string _profilePath;
 
-    private static readonly SymbolDefinition[] Definitions =
+    private static readonly SymbolDefinition[] X64Definitions =
     [
         new("Engine.dll", "?Update@LuaManager@GAME@@QEAAXH@Z", "LuaManager::Update(int)", true),
         new("Game.dll", "?s_instance@?$Singleton@VQuest2Repository@GAME@@@GAME@@0PEAVQuest2Repository@2@EA", "Live tracked quest repository", false, false),
@@ -105,6 +105,15 @@ public sealed class CompatibilityService
         new("Game.dll", "?RefreshCooldown@SkillManager@GAME@@UEAAXH@Z", "SkillManager::RefreshCooldown(int)", false),
     ];
 
+    // The 32-bit release intentionally exposes only the audited Lua bridge.
+    // Every object-layout-dependent utility remains unavailable until it has
+    // its own x86 layout and live-game validation; never reuse x64 offsets.
+    private static readonly SymbolDefinition[] X86Definitions =
+    [
+        new("Engine.dll", "?Update@LuaManager@GAME@@QAEXH@Z", "LuaManager::Update(int)", true),
+        new("Engine.dll", "?RunCode@LuaManager@GAME@@QAE_NPBD@Z", "LuaManager::RunCode(char const*)", true),
+    ];
+
     public CompatibilityService(string? profilePath = null)
     {
         _profilePath = profilePath ?? Path.Combine(CompanionDataPaths.DirectoryPath, "compatibility.json");
@@ -131,7 +140,8 @@ public sealed class CompatibilityService
             ["Game.dll"] = new(game.GameDllPath),
         };
         var symbols = new List<SymbolVerification>();
-        foreach (var definition in Definitions)
+        var definitions = game.Architecture == GameArchitecture.X64 ? X64Definitions : X86Definitions;
+        foreach (var definition in definitions)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var found = readers[definition.Module].Find(definition.Name);

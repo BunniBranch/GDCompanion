@@ -4,10 +4,15 @@ See the [README](../README.md) for requirements, first launch, licensing, and
 downloads. Use the complete matching app package, and keep separate, restorable
 character backups before changing anything. Steam Cloud is not a backup.
 
+Use the `win-x64` package with the normal 64-bit Steam launch or the `win-x86`
+package with **x86 Legacy**. The x86 package supports catalog browsing, ordinary
+item and blueprint spawning, and clean disconnect. Affixes, Navigation, and
+Character Utilities currently require the x64 package and x64 game process.
+
 ## Items and blueprints
 
 Search Item Catalog, select a record, and connect to a loaded single-player
-character before spawning. Quantity is limited to 1–100. The game handles delivery;
+character before spawning. Quantity is limited to 1–1000. The game handles delivery;
 if inventory space is insufficient, an item may drop nearby.
 
 Compatible equipment exposes prefix and suffix choices from your installed

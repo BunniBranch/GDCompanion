@@ -448,13 +448,15 @@ Require(cached.Count == 1, "regional quest cache resets when the active quest se
 
 var profile = Path.Combine(root, "build_test", "compatibility-test.json");
 var compatibility = await new CompatibilityService(profile).VerifyAndUpdateAsync(game);
+Require(compatibility.CanConnect, "required Lua bridge exports resolve in executable sections");
+Require(compatibility.Symbols.Where(x => x.Required).All(x => x.Rva > 0 && x.Fingerprint.Length == 64), "required symbol fingerprints are recorded");
+if (game.Architecture == GameArchitecture.X64)
+{
 var bookmarkSymbols = compatibility.Symbols.Where(x => x.FriendlyName.StartsWith("Bookmark ", StringComparison.Ordinal)).ToArray();
 Require(bookmarkSymbols.Length == 19 && bookmarkSymbols.All(x => x.Found && x.Fingerprint.Length == 64),
     "all persistent bookmark identity readiness and travel symbols resolve without executing game code");
 Require(!compatibility.Symbols.Any(x => x.FriendlyName == "GameEngine::SaveGame()"), "unused SaveGame export is not included in compatibility verification");
 Require(compatibility.Symbols.Any(x => x.FriendlyName == "Character::SetInvincible(bool)"), "invincibility export remains available for planned character utility support");
-Require(compatibility.CanConnect, "required Lua bridge exports resolve in executable sections");
-Require(compatibility.Symbols.Where(x => x.Required).All(x => x.Rva > 0 && x.Fingerprint.Length == 64), "required symbol fingerprints are recorded");
 Require(compatibility.Symbols.Any(x => x.FriendlyName == "GameEngine global instance" && x.Found), "native utility instance export is verified in readable data memory");
 Require(compatibility.Symbols.Where(x => x.FriendlyName.StartsWith("Character::", StringComparison.Ordinal) || x.FriendlyName.StartsWith("Player::", StringComparison.Ordinal)).All(x => x.Found), "character utility exports resolve for this game patch");
 var navigationSymbols = new[]
@@ -486,6 +488,21 @@ foreach (var hooks in assistHookMatches.Cast<System.Text.RegularExpressions.Matc
             export.Rva == Convert.ToUInt32(hook.Groups[2].Value[2..], 16) &&
             hash == Convert.ToUInt32(hook.Groups[3].Value[2..], 16)),
         "assist hook fingerprint matches installed game without executing game code");
+}
+}
+else
+{
+    Require(compatibility.Symbols.Count == 2 && compatibility.Symbols.All(x => x.Required && x.Found),
+        "x86 compatibility requires only the two audited Lua bridge exports");
+    var engineExports = new PeExportReader(game.EnginePath);
+    Require(engineExports.Find("?Update@LuaManager@GAME@@QAEXH@Z") is { IsExecutable: true, Rva: 0xD93B0 } &&
+            engineExports.Find("?RunCode@LuaManager@GAME@@QAE_NPBD@Z") is { IsExecutable: true, Rva: 0xD8F40 },
+        "x86 Lua exports match the current Steam game RVAs");
+    var x86BridgeSource = File.ReadAllText(Path.Combine(root, "src", "GrimDawnBridge", "BridgeX86.cpp"));
+    Require(x86BridgeSource.Contains("CAPS=LUA_SYNC,UNLOAD,X86", StringComparison.Ordinal) &&
+            !x86BridgeSource.Contains("ITEM_AFFIXES", StringComparison.Ordinal) &&
+            !x86BridgeSource.Contains("GAMEPLAY_ASSISTS", StringComparison.Ordinal),
+        "x86 bridge advertises only its audited capability surface");
 }
 await using (var assistCapabilityClient = new GameBridgeClient())
 {

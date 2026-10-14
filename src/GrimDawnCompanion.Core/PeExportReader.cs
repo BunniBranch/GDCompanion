@@ -18,8 +18,12 @@ public sealed class PeExportReader
         var sectionCount = U16(pe + 6);
         var optionalSize = U16(pe + 20);
         var optional = pe + 24;
-        if (U16(optional) != 0x20b) throw new InvalidDataException("The module is not a 64-bit PE image.");
-        _exportRva = U32(optional + 112);
+        _exportRva = U16(optional) switch
+        {
+            0x20b => U32(optional + 112), // PE32+
+            0x10b => U32(optional + 96),  // PE32
+            _ => throw new InvalidDataException("The module has an unsupported PE optional header."),
+        };
         var sectionTable = optional + optionalSize;
         for (var i = 0; i < sectionCount; i++)
         {

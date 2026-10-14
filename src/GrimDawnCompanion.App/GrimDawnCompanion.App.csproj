@@ -5,10 +5,10 @@
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Platforms>x64</Platforms>
-    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64;x86</Platforms>
+    <PlatformTarget>$(Platform)</PlatformTarget>
     <AssemblyName>GDCompanion</AssemblyName>
-    <Version>2.3.92</Version>
+    <Version>2.3.93</Version>
     <Product>GDCompanion</Product>
     <Authors>BunniBranch</Authors>
     <Company>BunniBranch</Company>

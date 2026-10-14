@@ -267,7 +267,7 @@ public partial class MainWindow : Window
         try
         {
             ConnectButton.IsEnabled = false;
-            SetStatus("Connecting", "Loading the transparent x64 bridge into the running local game…", 50);
+            SetStatus("Connecting", $"Loading the transparent {_game.ArchitectureName} bridge into the running local game…", 50);
             var bridgePath = Path.Combine(AppContext.BaseDirectory, "GrimDawnBridge.dll");
             ResourceCapBypassBox.IsChecked=false;
             var handshake = await _bridge.ConnectAsync(_game, bridgePath, _lifetime.Token);
@@ -345,8 +345,8 @@ public partial class MainWindow : Window
                 return;
             }
             var result = await _bridge.SpawnItemAsync(_viewModel.SelectedItem, quantity, CompleteComponentBox.IsChecked == true, _lifetime.Token);
-            if (!result.StartsWith("QUEUED", StringComparison.Ordinal)) throw new InvalidOperationException(result);
-            SetStatus("Item queued", $"{quantity} × {_viewModel.SelectedItem.Name}", 100);
+            if (!result.StartsWith("OK LUA", StringComparison.Ordinal)) throw new InvalidOperationException(result);
+            SetStatus("Items created", $"{quantity} × {_viewModel.SelectedItem.Name}. Check inventory or nearby ground if full.", 100);
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Item spawning not completed", MessageBoxButton.OK, MessageBoxImage.Warning); }
         finally { _itemSpawnBusy=false;if(sender is Button button) button.IsEnabled=true; }
@@ -991,7 +991,7 @@ public partial class MainWindow : Window
     {
         var dialog = new OpenFolderDialog { Title = "Choose the Grim Dawn installation folder", Multiselect = false };
         if (dialog.ShowDialog(this) != true) return;
-        if (!GameLocator.IsValid(dialog.FolderName)) { MessageBox.Show("That folder does not contain the x64 Grim Dawn installation and database."); return; }
+        if (!GameLocator.IsValid(dialog.FolderName)) { MessageBox.Show($"That folder does not contain the {(_game?.ArchitectureName ?? (Environment.Is64BitProcess ? "x64" : "x86"))} Grim Dawn installation and database."); return; }
         _settings.GameDirectory = dialog.FolderName;
         await _settings.SaveAsync();
         _game = GameLocator.Locate(dialog.FolderName);

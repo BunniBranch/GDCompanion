@@ -15,6 +15,7 @@ scripts/build_icon.py
 scripts/package-source.ps1
 scripts/source-manifest.txt
 src/GrimDawnBridge/Bridge.cpp
+src/GrimDawnBridge/BridgeX86.cpp
 src/GrimDawnBridge/CMakeLists.txt
 src/GrimDawnBridge/CharacterLevel.h
 src/GrimDawnBridge/CharacterLevelState.h

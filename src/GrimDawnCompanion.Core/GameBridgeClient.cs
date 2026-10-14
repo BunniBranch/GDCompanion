@@ -39,7 +39,7 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
         {
             try { return string.Equals(Path.GetFullPath(p.MainModule!.FileName), Path.GetFullPath(game.ExecutablePath), StringComparison.OrdinalIgnoreCase); }
             catch { return false; }
-        }) ?? throw new InvalidOperationException("Grim Dawn x64 is not running from the configured game directory.");
+        }) ?? throw new InvalidOperationException($"Grim Dawn {game.ArchitectureName} is not running from the configured game directory.");
         ProcessId = process.Id;
 
         if (!await TryOpenPipeAsync(process.Id, 250, cancellationToken))
@@ -79,7 +79,7 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
         quantity = Math.Clamp(quantity, 1, 1000);
         var path = item.RecordPath.Replace("\\", "/").Replace("\"", "\\\"");
         var lua = $"local p=Game.GetLocalPlayer(); if p~=nil then p:GiveItem(\"{path}\",{quantity},{completeComponent.ToString().ToLowerInvariant()}) end";
-        return await SendAsync("LUA\t" + lua, cancellationToken);
+        return await RunLuaSynchronousAsync(lua, cancellationToken);
     }
 
     public async Task<string> RunLuaAsync(string script, CancellationToken cancellationToken = default) =>

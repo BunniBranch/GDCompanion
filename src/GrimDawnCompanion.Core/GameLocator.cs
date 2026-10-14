@@ -7,20 +7,30 @@ public static partial class GameLocator
 {
     private const string RelativeGamePath = "steamapps\\common\\Grim Dawn";
 
-    public static GameInstallation? Locate(string? preferredPath = null)
+    public static GameInstallation? Locate(string? preferredPath = null, GameArchitecture? architecture = null)
     {
+        var selected = architecture ?? (Environment.Is64BitProcess ? GameArchitecture.X64 : GameArchitecture.X86);
         foreach (var candidate in EnumerateCandidates(preferredPath).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            if (IsValid(candidate)) return new GameInstallation(Path.GetFullPath(candidate));
+            if (IsValid(candidate, selected)) return new GameInstallation(Path.GetFullPath(candidate), selected);
         }
         return null;
     }
 
-    public static bool IsValid(string? root) =>
+    public static bool IsValid(string? root) => IsValid(root,
+        Environment.Is64BitProcess ? GameArchitecture.X64 : GameArchitecture.X86);
+
+    public static bool IsValid(string? root, GameArchitecture architecture)
+    {
+        var binaryDirectory = architecture == GameArchitecture.X64 ? Path.Combine(root ?? "", "x64") : root;
+        return
         !string.IsNullOrWhiteSpace(root) &&
-        File.Exists(Path.Combine(root, "x64", "Grim Dawn.exe")) &&
-        File.Exists(Path.Combine(root, "x64", "Engine.dll")) &&
+        !string.IsNullOrWhiteSpace(binaryDirectory) &&
+        File.Exists(Path.Combine(binaryDirectory, "Grim Dawn.exe")) &&
+        File.Exists(Path.Combine(binaryDirectory, "Engine.dll")) &&
+        File.Exists(Path.Combine(binaryDirectory, "Game.dll")) &&
         File.Exists(Path.Combine(root, "database", "database.arz"));
+    }
 
     public static IReadOnlyList<GameArchive> GetInstalledArchives(GameInstallation game)
     {

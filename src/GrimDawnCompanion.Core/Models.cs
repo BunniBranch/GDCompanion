@@ -2,11 +2,18 @@ using System.Text.Json.Serialization;
 
 namespace GrimDawnCompanion.Core;
 
-public sealed record GameInstallation(string RootDirectory)
+public enum GameArchitecture { X86, X64 }
+
+public sealed record GameInstallation(string RootDirectory, GameArchitecture Architecture)
 {
-    public string ExecutablePath => Path.Combine(RootDirectory, "x64", "Grim Dawn.exe");
-    public string EnginePath => Path.Combine(RootDirectory, "x64", "Engine.dll");
-    public string GameDllPath => Path.Combine(RootDirectory, "x64", "Game.dll");
+    public GameInstallation(string rootDirectory) : this(rootDirectory,
+        Environment.Is64BitProcess ? GameArchitecture.X64 : GameArchitecture.X86) { }
+
+    public string ArchitectureName => Architecture == GameArchitecture.X64 ? "x64" : "x86";
+    private string BinaryDirectory => Architecture == GameArchitecture.X64 ? Path.Combine(RootDirectory, "x64") : RootDirectory;
+    public string ExecutablePath => Path.Combine(BinaryDirectory, "Grim Dawn.exe");
+    public string EnginePath => Path.Combine(BinaryDirectory, "Engine.dll");
+    public string GameDllPath => Path.Combine(BinaryDirectory, "Game.dll");
     public string ArchiveToolPath => Path.Combine(RootDirectory, "ArchiveTool.exe");
 }
 

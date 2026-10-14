@@ -1,15 +1,17 @@
 [CmdletBinding()]
 param(
     [string]$Configuration = 'Release',
+    [ValidateSet('x64','x86')][string]$Architecture = 'x64',
     [switch]$SkipTests,
     [ValidatePattern('^(-[a-zA-Z0-9]+)?$')][string]$DestinationSuffix = ''
 )
 
 $ErrorActionPreference = 'Stop'
+$version = '2.3.93'
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $source = Join-Path $root 'src'
-$destination = Join-Path $root "build\GDCompanion-2.3.92$DestinationSuffix"
-$nativeBuild = Join-Path $root "build_native$DestinationSuffix"
+$destination = Join-Path $root "build\GDCompanion-$version-win-$Architecture$DestinationSuffix"
+$nativeBuild = Join-Path $root "build_native-$Architecture$DestinationSuffix"
 $dotnet = Join-Path $root '.tools\dotnet-sdk\dotnet.exe'
 if (-not (Test-Path -LiteralPath $dotnet)) { $dotnet = (Get-Command dotnet).Source }
 $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
@@ -24,12 +26,12 @@ $env:APPDATA = Join-Path $root '.dotnet-home\AppData\Roaming'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 
-& $devShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+& $devShell -Arch $Architecture -HostArch amd64 -SkipAutomaticLocation
 & $cmake -S (Join-Path $source 'GrimDawnBridge') -B $nativeBuild -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" "-DCMAKE_BUILD_TYPE=$Configuration"
 if ($LASTEXITCODE -ne 0) { throw 'Native bridge configuration failed.' }
 & $cmake --build $nativeBuild --config $Configuration
 if ($LASTEXITCODE -ne 0) { throw 'Native bridge build failed.' }
-if (-not $SkipTests) {
+if (-not $SkipTests -and $Architecture -eq 'x64') {
     & (Join-Path $nativeBuild 'ItemAffixTests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Native item affix tests failed.' }
     & (Join-Path $nativeBuild 'CharacterResourceTests.exe')
@@ -65,9 +67,9 @@ if (Test-Path -LiteralPath $destination) {
 }
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
 
-& $dotnet restore (Join-Path $source 'GrimDawnCompanion.App\GrimDawnCompanion.App.csproj') -p:Platform=x64
+& $dotnet restore (Join-Path $source 'GrimDawnCompanion.App\GrimDawnCompanion.App.csproj') -p:Platform=$Architecture
 if ($LASTEXITCODE -ne 0) { throw 'Desktop application restore failed.' }
-& $dotnet publish (Join-Path $source 'GrimDawnCompanion.App\GrimDawnCompanion.App.csproj') -c $Configuration -p:Platform=x64 --no-restore -o $destination --self-contained false
+& $dotnet publish (Join-Path $source 'GrimDawnCompanion.App\GrimDawnCompanion.App.csproj') -c $Configuration -p:Platform=$Architecture --no-restore -o $destination --self-contained false
 if ($LASTEXITCODE -ne 0) { throw 'Desktop application publish failed.' }
 Copy-Item -LiteralPath (Join-Path $nativeBuild 'GrimDawnBridge.dll') -Destination $destination -Force
 Copy-Item -LiteralPath (Join-Path $root 'README.md'),(Join-Path $root 'THIRD-PARTY-NOTICES.md') -Destination $destination -Force
@@ -79,11 +81,17 @@ foreach ($doc in 'user-guide.md','developer-guide.md') {
 }
 
 if (-not $SkipTests) {
-    & $dotnet restore (Join-Path $source 'GrimDawnCompanion.Tests\GrimDawnCompanion.Tests.csproj') -p:Platform=x64
+    & $dotnet restore (Join-Path $source 'GrimDawnCompanion.Tests\GrimDawnCompanion.Tests.csproj') -p:Platform=$Architecture
     if ($LASTEXITCODE -ne 0) { throw 'Test restore failed.' }
-    & $dotnet build (Join-Path $source 'GrimDawnCompanion.Tests\GrimDawnCompanion.Tests.csproj') -c $Configuration -p:Platform=x64 --no-restore
+    & $dotnet build (Join-Path $source 'GrimDawnCompanion.Tests\GrimDawnCompanion.Tests.csproj') -c $Configuration -p:Platform=$Architecture --no-restore
     if ($LASTEXITCODE -ne 0) { throw 'Test build failed.' }
-    & $dotnet (Join-Path $source "GrimDawnCompanion.Tests\bin\x64\$Configuration\net8.0-windows\GrimDawnCompanion.Tests.dll") $root
+    $testDotnet = $dotnet
+    if ($Architecture -eq 'x86') {
+        $x86Dotnet = Join-Path ${env:ProgramFiles(x86)} 'dotnet\dotnet.exe'
+        if (-not (Test-Path -LiteralPath $x86Dotnet)) { throw '.NET 8 x86 runtime is required to execute the x86 verification suite.' }
+        $testDotnet = $x86Dotnet
+    }
+    & $testDotnet (Join-Path $source "GrimDawnCompanion.Tests\bin\$Architecture\$Configuration\net8.0-windows\GrimDawnCompanion.Tests.dll") $root
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
 }
 
@@ -101,14 +109,22 @@ foreach ($binary in (Get-ChildItem -LiteralPath $destination -File | Where-Objec
         }
     }
 }
+$expectedMachine = if ($Architecture -eq 'x64') { 0x8664 } else { 0x014c }
+foreach ($binaryName in 'GDCompanion.exe','GrimDawnBridge.dll') {
+    $binaryPath = Join-Path $destination $binaryName
+    $binaryBytes = [IO.File]::ReadAllBytes($binaryPath)
+    $peOffset = [BitConverter]::ToInt32($binaryBytes, 0x3c)
+    $machine = [BitConverter]::ToUInt16($binaryBytes, $peOffset + 4)
+    if ($machine -ne $expectedMachine) { throw "$binaryName has the wrong architecture for the $Architecture package." }
+}
 foreach ($notice in 'LICENSE','COPYRIGHT.md','THIRD-PARTY-NOTICES.md','MINHOOK-LICENSE.txt','Assets\Fonts\OFL.txt') {
     if (-not (Test-Path -LiteralPath (Join-Path $destination $notice))) { throw "Missing release notice: $notice" }
 }
 
-$sourceZip = Join-Path $root 'build\GDCompanion-v2.3.92-source.zip'
+$sourceZip = Join-Path $root "build\GDCompanion-v$version-source.zip"
 & (Join-Path $PSScriptRoot 'package-source.ps1') -DestinationZip $sourceZip
 
-$zip = Join-Path $root 'build\GDCompanion-v2.3.92-win-x64.zip'
+$zip = Join-Path $root "build\GDCompanion-v$version-win-$Architecture.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path (Join-Path $destination '*') -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Build ready: $destination"

@@ -8,8 +8,8 @@ See the [README](../README.md) for build prerequisites and licensing, and the
 - `GrimDawnCompanion.App`: WPF interface, navigation, and desktop radar fallback.
 - `GrimDawnCompanion.Core`: archive parsing, local catalogs, compatibility checks,
   bridge injection, and the named-pipe client.
-- `GrimDawnBridge`: x64 native bridge with bounded game-thread requests and
-  capability-scoped calls.
+- `GrimDawnBridge`: native x64 bridge plus a deliberately minimal x86 bridge,
+  both with bounded game-thread requests and capability-scoped calls.
 - `GrimDawnCompanion.CatalogBuilder`: optional local catalog inspection tool.
 - `GrimDawnCompanion.Tests`: managed integration and regression checks. Native
   transaction/behavior tests are built from `GrimDawnBridge`.
@@ -25,10 +25,13 @@ From the source root in PowerShell:
 
 ```powershell
 .\scripts\build.ps1
+.\scripts\build.ps1 -Architecture x86
 ```
 
-The script uses Visual Studio's x64 C++ environment, CMake/Ninja, and the .NET 8
-SDK to build the bridge and app, run native/managed checks, and package releases.
+The script uses Visual Studio's matching C++ environment, CMake/Ninja, and the
+.NET 8 SDK to build the bridge and app, run native/managed checks, and package
+releases. Native transaction tests are x64-only; the managed suite verifies the
+x86 export surface, PE architecture, and fail-closed capability boundary.
 It prefers the local `.tools/dotnet-sdk` if present, otherwise the installed SDK.
 The full suite requires a local Steam installation with the tested expansions;
 installed-data checks generate their own isolated catalog under ignored `tmp/`.
@@ -75,10 +78,11 @@ Historical validation records, drafts, and maintainer setup notes may remain in 
 developer's local `docs/` folder, but are ignored by Git and excluded from packaging
 and Git source exports. They are not build inputs.
 
-The build creates `GDCompanion-v<version>-win-x64.zip` and the matching
-`GDCompanion-v<version>-source.zip` under `build/`. Publish both together with
-equally accessible download links. Packaging-only documentation changes must also
-reach the regenerated archives; old ZIPs do not update automatically.
+The builds create `GDCompanion-v<version>-win-x64.zip`,
+`GDCompanion-v<version>-win-x86.zip`, and the matching source ZIP under `build/`.
+Publish all three together with equally accessible download links. Packaging-only
+documentation changes must also reach the regenerated archives; old ZIPs do not
+update automatically.
 
 Release checks require the GPL license, copyright notice, third-party notices,
 MinHook license, and font license. Managed build paths are normalized and debug

@@ -1139,6 +1139,11 @@ namespace
         }
         if (request->kind == WorkKind::Lua)
         {
+            if (request->deadline && GetTickCount64() > request->deadline)
+            {
+                Complete(request, "ERROR LUA_REQUEST_EXPIRED");
+                return;
+            }
             Complete(request, g_runCode && manager && g_runCode(manager, request->payload.data()) ? "OK LUA" : "ERROR LUA_EXECUTION_FAILED");
             return;
         }
@@ -1385,13 +1390,17 @@ namespace
             if (strlen(line + 4) >= kCommandSize) { Reply(pipe, "ERROR COMMAND_TOO_LONG"); return; }
             auto request = std::make_shared<WorkRequest>();
             strcpy_s(request->payload.data(), request->payload.size(), line + 4);
+            request->deadline = GetTickCount64() + 7500;
             if (Enqueue(request)) Reply(pipe, "QUEUED"); else Reply(pipe, "ERROR QUEUE_FULL_OR_COMMAND_TOO_LONG");
             return;
         }
         if (strncmp(line, "LUA_SYNC\t", 9) == 0)
         {
             if (strlen(line + 9) >= kCommandSize) { Reply(pipe, "ERROR COMMAND_TOO_LONG"); return; }
-            auto request = std::make_shared<WorkRequest>(); strcpy_s(request->payload.data(), request->payload.size(), line + 9); SubmitAndWait(pipe, request); return;
+            auto request = std::make_shared<WorkRequest>();
+            strcpy_s(request->payload.data(), request->payload.size(), line + 9);
+            request->deadline = GetTickCount64() + 7500;
+            SubmitAndWait(pipe, request); return;
         }
         if (strcmp(line, "RESOURCE\tGET") == 0)
         {

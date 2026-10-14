@@ -48,11 +48,11 @@ features on a disposable character first.
 
 ## Requirements
 
-- A 64-bit Windows PC.
-- An installed copy of the **Steam x64 edition of Grim Dawn**. Other editions
-  are not currently supported.
-- The **.NET 8 Desktop Runtime (x64)** to run the app. The SDK is only needed
-  if you want to build it yourself.
+- A Windows PC. Download the package matching the game process you use:
+  `win-x64` for the normal 64-bit launch or `win-x86` for Steam's **x86 Legacy**
+  launch option. Other editions are not currently supported.
+- The matching **.NET 8 Desktop Runtime** (x64 or x86) to run the app. The SDK
+  is only needed if you want to build it yourself.
 - The game's `ArchiveTool.exe`, readable game archives, and permission to write
   to your local application-data folder for catalog generation.
 
@@ -68,8 +68,10 @@ display; the supported in-game renderer also works in Fullscreen.
 1. Download the Windows ZIP from this repository's **Releases** section, when
    available, and extract the whole archive into a folder. Keep the supplied
    files together.
-2. Install the .NET 8 Desktop Runtime (x64) if it is not already installed.
-3. Start Grim Dawn using its 64-bit option and load a single-player character.
+2. Install the .NET 8 Desktop Runtime matching that package if it is not already
+   installed.
+3. Start Grim Dawn with the matching Steam launch option and load a single-player
+   character.
 4. Run `GDCompanion.exe`. The first launch builds a local catalog and can take
    several minutes. Later launches reuse and check the cache.
 5. Wait for compatibility and catalog status to show **Ready**, then choose
@@ -88,6 +90,12 @@ The bridge has no network access or anti-cheat bypass behavior.
 Choose **Disconnect** when you are finished. It stops active assists and radar
 and requests that the bridge unload without closing the game. The
 **Automatically Unload Bridge When Closing** setting is also enabled by default.
+
+The x86 Legacy package currently supports catalog browsing, ordinary item and
+blueprint spawning, compatibility verification, and clean disconnect. Equipment
+affix spawning, Navigation, and Character Utilities remain x64-only because they
+depend on architecture-specific game layouts that have not been verified on x86.
+Unsupported pages stay capability-gated rather than reusing x64 addresses.
 
 ## Local data and privacy
 
@@ -123,19 +131,20 @@ and troubleshooting in more detail.
 ## Building from source
 
 You will need the **.NET 8 SDK**, Visual Studio with **Desktop development with
-C++**, MSVC x64 tools, the Windows SDK, CMake, and Ninja.
+C++**, MSVC x64 and x86 tools, the Windows SDK, CMake, and Ninja.
 
 From the project folder, run:
 
 ```powershell
 .\scripts\build.ps1
+.\scripts\build.ps1 -Architecture x86
 ```
 
 The full test suite requires a local Steam game installation with the tested
 expansions. To compile and package without those installed-game checks, run:
 
 ```powershell
-.\scripts\build.ps1 -SkipTests
+.\scripts\build.ps1 -Architecture x64 -SkipTests
 ```
 
 Skipping tests does not make a build a validated release. The build produces

@@ -1,25 +1,30 @@
 cmake_minimum_required(VERSION 3.20)
 project(GrimDawnBridge LANGUAGES C CXX)
 
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-  message(FATAL_ERROR "GrimDawnBridge must be built for x64")
-endif()
-
 set(MINHOOK_ROOT "${CMAKE_CURRENT_LIST_DIR}/../ThirdParty/minhook")
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(HDE_SOURCE "${MINHOOK_ROOT}/src/hde/hde64.c")
+  set(BRIDGE_SOURCE Bridge.cpp)
+else()
+  set(HDE_SOURCE "${MINHOOK_ROOT}/src/hde/hde32.c")
+  set(BRIDGE_SOURCE BridgeX86.cpp)
+endif()
 add_library(minhook STATIC
   "${MINHOOK_ROOT}/src/buffer.c"
   "${MINHOOK_ROOT}/src/hook.c"
   "${MINHOOK_ROOT}/src/trampoline.c"
-  "${MINHOOK_ROOT}/src/hde/hde64.c")
+  "${HDE_SOURCE}")
 target_include_directories(minhook PUBLIC "${MINHOOK_ROOT}/include" PRIVATE "${MINHOOK_ROOT}/src")
 target_compile_definitions(minhook PRIVATE _CRT_SECURE_NO_WARNINGS)
+set_property(TARGET minhook PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-add_library(GrimDawnBridge SHARED Bridge.cpp)
+add_library(GrimDawnBridge SHARED "${BRIDGE_SOURCE}")
 target_link_libraries(GrimDawnBridge PRIVATE minhook)
 target_compile_features(GrimDawnBridge PRIVATE cxx_std_20)
 target_compile_definitions(GrimDawnBridge PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 set_property(TARGET GrimDawnBridge PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set_target_properties(GrimDawnBridge PROPERTIES OUTPUT_NAME "GrimDawnBridge")
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 add_executable(MasteryRespecTests MasteryRespecTests.cpp)
 add_executable(QuestStageCaptureTests QuestStageCaptureTests.cpp)
 add_executable(RadarCanvasStateTests RadarCanvasStateTests.cpp)
@@ -45,3 +50,4 @@ target_compile_definitions(GameplayAssistRuntimeTests PRIVATE UNICODE _UNICODE W
 target_link_libraries(GameplayAssistRuntimeTests PRIVATE minhook)
 target_compile_features(MasteryRespecTests PRIVATE cxx_std_20)
 target_compile_definitions(MasteryRespecTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()

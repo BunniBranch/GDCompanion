@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 var game = GameLocator.Locate(args.Length > 0 ? args[0] : null)
-    ?? throw new InvalidOperationException("Grim Dawn x64 installation was not found.");
+    ?? throw new InvalidOperationException($"Grim Dawn {(Environment.Is64BitProcess ? "x64" : "x86")} installation was not found.");
 var bridge = args.Length > 1
     ? Path.GetFullPath(args[1])
     : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "GrimDawnBridge.dll"));
@@ -47,6 +47,15 @@ try
 {
     var response = await client.ConnectAsync(game, bridge);
     Console.WriteLine($"SUCCESS: PID {client.ProcessId}, {response}");
+    if (args.Contains("--lua-smoke", StringComparer.OrdinalIgnoreCase))
+    {
+        var send = typeof(GameBridgeClient).GetMethod("SendAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var luaResponse = await (Task<string>)send.Invoke(client, ["LUA_SYNC\tlocal gdcompanion_x86_smoke=1", CancellationToken.None])!;
+        Console.WriteLine("LUA: " + luaResponse);
+        var unloaded = await client.UnloadAsync();
+        Console.WriteLine(unloaded ? "SUCCESS: bridge accepted unload and disconnected" : "NOTICE: bridge does not support self-unload");
+        return luaResponse == "OK LUA" && unloaded ? 0 : 2;
+    }
     if (args.Contains("--minimap-dump", StringComparer.OrdinalIgnoreCase))
     {
         var send = typeof(GameBridgeClient).GetMethod("SendAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
