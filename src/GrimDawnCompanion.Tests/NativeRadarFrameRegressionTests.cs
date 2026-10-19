@@ -15,7 +15,7 @@ internal static class NativeRadarFrameRegressionTests
             static double Radius(NavigationOverlayPoint point) => Math.Sqrt(point.HorizontalRatio * point.HorizontalRatio + point.VerticalRatio * point.VerticalRatio);
             require(q.IsDistant && p.IsDistant && Math.Abs(Radius(q) - 1.05) < .00001 && Math.Abs(Radius(p) - .91) < .00001 &&
                 Math.Abs(q.HorizontalRatio * p.VerticalRatio - q.VerticalRatio * p.HorizontalRatio) < .00001,
-                "external automatic/manual quest stars use an outer lane with unchanged POI bearing and rim");
+                "native and catalog projection quest stars use an outer lane with unchanged POI bearing and rim");
             var near = NavigationOverlayProjection.Build(new(0, 0, 0), [quest with { WorldX = 38 }], [], true, false, 40, projection: camera).Single();
             require(!near.IsDistant && Math.Abs(Radius(near) - .95) < .00001,
                 "visible near-edge quest remains at its actual minimap location");

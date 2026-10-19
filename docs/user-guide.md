@@ -34,10 +34,10 @@ After an uncertain delivery, do not retry blindly: check the game first.
 
 ## Radar
 
-Enable Radar Overlay in Navigation or use the title-bar radar indicator.
-Automatic alignment follows the minimap's position, size, zoom, and rotation.
-Supported builds use an in-game renderer that works in Fullscreen. The external
-fallback needs Borderless Windowed mode for reliable display.
+Enable In-Game Radar in Navigation or use the title-bar radar indicator.
+The native renderer follows the minimap's position, size, zoom, and rotation
+and works in Fullscreen and windowed modes. Radar remains unavailable when the
+installed game build does not pass the native projection and canvas checks.
 
 Quest stars represent supported active tracked objectives. Distant bearings
 cover the current connected map region, not unrelated maps or dungeons.
@@ -49,9 +49,6 @@ turning off the master POI switch retains your category selections. Filtering
 does not hide the game's own icons or change quest tracking. Hover over a marker
 to identify it. Radar itself does not complete quests, unlock rifts, or write
 quest tokens. Disabling radar or disconnecting clears its markers.
-
-Advanced manual calibration is a fallback, not the recommended mode. Manual
-range applies only when automatic alignment is off.
 
 ## Position bookmarks
 

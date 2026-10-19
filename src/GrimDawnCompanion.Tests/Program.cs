@@ -82,8 +82,8 @@ var navigationPage = mainWindowMarkup.Descendants(presentation + "TabControl")
 var utilitiesPage = mainWindowMarkup.Descendants(presentation + "TabControl")
     .Single(page => (string?)page.Attribute(xaml + "Name") == "UtilitiesPage");
 Require(navigationPage.Elements(presentation + "TabItem").Select(tab => (string?)tab.Attribute("Header"))
-        .SequenceEqual(new[] { "Radar Overlay", "Position Bookmarks" }),
-    "Navigation contains Radar Overlay and Position Bookmarks in order");
+        .SequenceEqual(new[] { "In-Game Radar", "Position Bookmarks" }),
+    "Navigation contains In-Game Radar and Position Bookmarks in order");
 Require(utilitiesPage.Elements(presentation + "TabItem").Select(tab => (string?)tab.Attribute("Header"))
         .SequenceEqual(new[] { "Gameplay Assists", "Character Resources", "Mastery Respec", "Blueprints", "Quest-Token Inspector" }),
     "Character Utilities retains only character and progression tabs");
@@ -469,7 +469,7 @@ var navigationSymbols = new[]
     "FixedItemContainer::IsOfInterest()", "FixedItemShrine::IsOfInterest()", "MonsterShrine::IsOfInterest()",
     "StaticShrine::IsOfInterest()", "StaticTeleporter::IsOfInterest()", "StaticTeleporter::AppendDetailMapData()"
 };
-Require(navigationSymbols.All(name => compatibility.Symbols.Any(x => x.FriendlyName == name && x.Found)), "external radar data exports resolve for this game patch");
+Require(navigationSymbols.All(name => compatibility.Symbols.Any(x => x.FriendlyName == name && x.Found)), "native radar data exports resolve for this game patch");
 var assistNativeSource = File.ReadAllText(Path.Combine(root, "src", "GrimDawnBridge", "GameplayAssists.h"));
 var gameExports = new PeExportReader(game.GameDllPath);
 var assistHookMatches = System.Text.RegularExpressions.Regex.Matches(assistNativeSource,

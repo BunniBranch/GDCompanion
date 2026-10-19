@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$version = '2.3.93'
+$version = '2.3.94'
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $source = Join-Path $root 'src'
 $destination = Join-Path $root "build\GDCompanion-$version-win-$Architecture$DestinationSuffix"

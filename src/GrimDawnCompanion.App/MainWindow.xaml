@@ -239,14 +239,14 @@
 
         <!-- Navigation -->
         <TabControl x:Name="NavigationPage" Visibility="Collapsed">
-          <TabItem Header="Radar Overlay">
+          <TabItem Header="In-Game Radar">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
               <Grid Margin="0,18,0,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="1.15*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                 <Border Style="{StaticResource Card}">
                   <StackPanel>
-                    <TextBlock Text="Quest &amp; POI Radar Overlay" FontSize="19" FontWeight="SemiBold"/>
-                    <TextBlock Text="Show quest objectives and points of interest on a click-through overlay aligned with Grim Dawn's minimap." Foreground="{StaticResource SecondaryText}" TextWrapping="Wrap" Margin="0,6,0,18"/>
+                    <TextBlock Text="Quest &amp; POI In-Game Radar" FontSize="19" FontWeight="SemiBold"/>
+                    <TextBlock Text="Show quest objectives and points of interest directly inside Grim Dawn's minimap." Foreground="{StaticResource SecondaryText}" TextWrapping="Wrap" Margin="0,6,0,18"/>
                     <CheckBox x:Name="NavigationQuestBox" Content="Active Quest Objectives" IsChecked="True" Foreground="{StaticResource PrimaryText}" Margin="0,0,0,12" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
                     <CheckBox x:Name="NavigationPoiBox" Content="Points Of Interest" IsChecked="True" Foreground="{StaticResource PrimaryText}" Margin="0,0,0,14" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
                     <Expander Header="POI Type Filter" Foreground="{StaticResource SecondaryText}" Margin="0,0,0,14" IsEnabled="{Binding IsChecked, ElementName=NavigationPoiBox}">
@@ -267,44 +267,8 @@
                         <CheckBox Content="Other POIs" Tag="Other" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
                       </WrapPanel>
                     </Expander>
-                    <CheckBox x:Name="NavigationAutomaticBox" Content="Automatically align with the game minimap" IsChecked="True" Foreground="{StaticResource PrimaryText}" Margin="0,0,0,8" Checked="NavigationAlignmentModeChanged" Unchecked="NavigationAlignmentModeChanged"/>
-                    <TextBlock x:Name="NavigationAlignmentStatusText" Text="Automatically matches the minimap's position, size, zoom and rotation. No resolution preset is needed." Foreground="{StaticResource SecondaryText}" TextWrapping="Wrap" Margin="0,0,0,14"/>
-                    <Expander Header="Advanced Calibration(Not Recommended)" Foreground="{StaticResource SecondaryText}" Margin="0,0,0,16" IsExpanded="False">
-                    <StackPanel Margin="0,12,0,0">
-                    <StackPanel x:Name="NavigationManualPanel" IsEnabled="False">
-                    <TextBlock Text="MANUAL POSITION &amp; SIZE" Foreground="{StaticResource Accent}" FontWeight="Bold" FontSize="11" Margin="0,0,0,8"/>
-                    <TextBlock Text="Turn off automatic alignment to adjust these saved manual settings." TextWrapping="Wrap" FontSize="12" Margin="0,0,0,12"/>
-                    <Grid Margin="0,0,0,5">
-                      <Grid.ColumnDefinitions><ColumnDefinition Width="82"/><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions>
-                      <TextBlock Text="Horizontal" Foreground="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
-                      <Slider x:Name="NavigationHorizontalOffsetSlider" Grid.Column="1" Minimum="-300" Maximum="300" Value="0" TickFrequency="5" IsSnapToTickEnabled="True" ValueChanged="NavigationOverlaySettingChanged"/>
-                      <TextBlock x:Name="NavigationHorizontalOffsetText" Grid.Column="2" Text="0 px" Foreground="{StaticResource PrimaryText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                    </Grid>
-                    <Grid Margin="0,0,0,5">
-                      <Grid.ColumnDefinitions><ColumnDefinition Width="82"/><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions>
-                      <TextBlock Text="Vertical" Foreground="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
-                      <Slider x:Name="NavigationVerticalOffsetSlider" Grid.Column="1" Minimum="-300" Maximum="300" Value="0" TickFrequency="5" IsSnapToTickEnabled="True" ValueChanged="NavigationOverlaySettingChanged"/>
-                      <TextBlock x:Name="NavigationVerticalOffsetText" Grid.Column="2" Text="0 px" Foreground="{StaticResource PrimaryText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                    </Grid>
-                    <Grid Margin="0,0,0,9">
-                      <Grid.ColumnDefinitions><ColumnDefinition Width="82"/><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions>
-                      <TextBlock Text="Size" Foreground="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
-                      <Slider x:Name="NavigationScaleSlider" Grid.Column="1" Minimum="0.6" Maximum="1.5" Value="1" TickFrequency="0.05" IsSnapToTickEnabled="True" ValueChanged="NavigationOverlaySettingChanged"/>
-                      <TextBlock x:Name="NavigationScaleText" Grid.Column="2" Text="1.00×" Foreground="{StaticResource PrimaryText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                    </Grid>
-                    <Button Style="{StaticResource SecondaryButton}" Content="Reset Manual Position &amp; Size" Click="ResetNavigationOverlayAlignment" Margin="0,0,0,12"/>
-                    </StackPanel>
-                    <TextBlock Text="MAP DISTANCE" Foreground="{StaticResource Accent}" FontWeight="Bold" FontSize="11" Margin="0,8,0,8"/>
-                    <TextBlock Text="Automatic mode follows the game's minimap zoom and rotation. This range applies only to manual mode." TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/>
-                    <Grid Margin="0,0,0,9">
-                      <Grid.ColumnDefinitions><ColumnDefinition Width="82"/><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions>
-                      <TextBlock Text="Range" Foreground="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
-                      <Slider x:Name="NavigationRangeSlider" Grid.Column="1" Minimum="25" Maximum="100" Value="48" TickFrequency="1" IsSnapToTickEnabled="True" ValueChanged="NavigationOverlaySettingChanged"/>
-                      <TextBlock x:Name="NavigationRangeText" Grid.Column="2" Text="48 u" Foreground="{StaticResource PrimaryText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                    </Grid>
-                    </StackPanel>
-                    </Expander>
-                    <Button x:Name="NavigationToggleButton" Style="{StaticResource PrimaryButton}" Content="Enable Radar Overlay" Click="ToggleNavigationMarkers" IsEnabled="False"/>
+                    <TextBlock x:Name="NavigationAlignmentStatusText" Text="Native rendering follows the game's minimap position, size, zoom and rotation." Foreground="{StaticResource SecondaryText}" TextWrapping="Wrap" Margin="0,0,0,14"/>
+                    <Button x:Name="NavigationToggleButton" Style="{StaticResource PrimaryButton}" Content="Enable In-Game Radar" Click="ToggleNavigationMarkers" IsEnabled="False"/>
                     <Border Background="{StaticResource PanelRaised}" CornerRadius="7" Padding="12" Margin="0,14,0,0">
                       <DockPanel>
                         <Ellipse x:Name="NavigationStatusDot" DockPanel.Dock="Left" Width="8" Height="8" Fill="{StaticResource SecondaryText}" Margin="0,2,9,0" VerticalAlignment="Top"/>
@@ -316,8 +280,8 @@
                 </Border>
                 <Border Grid.Column="2" Style="{StaticResource Card}">
                   <StackPanel>
-                    <TextBlock Text="Fullscreen-Compatible Overlay" FontSize="19" FontWeight="SemiBold"/>
-                    <TextBlock Text="Automatic mode draws markers and hover labels within Grim Dawn's interface. Alignment follows the game's resolution, interface scale and minimap each frame. The overlay hides when a supported minimap is unavailable. Manual mode use a separate overlay window. No game settings or save data are changed." Foreground="{StaticResource SecondaryText}" TextWrapping="Wrap" Margin="0,7,0,18"/>
+                    <TextBlock Text="Native In-Game Rendering" FontSize="19" FontWeight="SemiBold"/>
+                    <TextBlock Text="Markers and hover labels are drawn within Grim Dawn's interface. Alignment follows the game's resolution, interface scale and minimap each frame. Radar hides when a supported minimap is unavailable. No game settings or save data are changed." Foreground="{StaticResource SecondaryText}" TextWrapping="Wrap" Margin="0,7,0,18"/>
                     <TextBlock Text="How It Works" Foreground="{StaticResource Accent}" FontWeight="Bold" FontSize="11"/>
                     <TextBlock Text="• Distant active quest objectives appear as gold direction stars beyond the POI rim.&#10;• Nearby POIs include services and travel utilities, such as boats.&#10;• Hover over a marker to identify it.&#10;• The nearest distant catalogue POIs appear at the rim to show their direction.&#10;• The overlay hides when Grim Dawn is minimized or another app has focus.&#10;• Markers clear when the overlay is disabled, Companion disconnects, or Companion closes." Foreground="{StaticResource PrimaryText}" TextWrapping="Wrap" Margin="0,8,0,0" LineHeight="23"/>
                   </StackPanel>

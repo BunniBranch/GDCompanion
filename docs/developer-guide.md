@@ -5,7 +5,7 @@ See the [README](../README.md) for build prerequisites and licensing, and the
 
 ## Project layout
 
-- `GrimDawnCompanion.App`: WPF interface, navigation, and desktop radar fallback.
+- `GrimDawnCompanion.App`: WPF interface, navigation controls, and native-radar orchestration.
 - `GrimDawnCompanion.Core`: archive parsing, local catalogs, compatibility checks,
   bridge injection, and the named-pipe client.
 - `GrimDawnBridge`: native x64 bridge plus a deliberately minimal x86 bridge,

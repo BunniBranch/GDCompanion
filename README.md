@@ -60,8 +60,8 @@ Installed expansions are indexed along with the base game. Some features need
 a verified game build and may be unavailable after a patch until compatibility
 is confirmed. Do not assume every mod or custom campaign is supported.
 
-The external radar fallback needs **Borderless Windowed** mode for reliable
-display; the supported in-game renderer also works in Fullscreen.
+Radar uses the verified in-game renderer and works in Fullscreen and windowed
+modes. It remains unavailable when the installed build fails native checks.
 
 ## Getting started
 

@@ -8,7 +8,7 @@
     <Platforms>x64;x86</Platforms>
     <PlatformTarget>$(Platform)</PlatformTarget>
     <AssemblyName>GDCompanion</AssemblyName>
-    <Version>2.3.93</Version>
+    <Version>2.3.94</Version>
     <Product>GDCompanion</Product>
     <Authors>BunniBranch</Authors>
     <Company>BunniBranch</Company>

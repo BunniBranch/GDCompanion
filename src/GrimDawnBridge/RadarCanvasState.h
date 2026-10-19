@@ -84,7 +84,7 @@ namespace RadarCanvas
     inline bool Fresh(const Frame& frame, unsigned long long context, unsigned long long now)
     { return context && frame.context == context && frame.updated && now >= frame.updated && now - frame.updated < 1500; }
 
-    // Identical world-to-minimap transform and rim clamping to the external renderer.
+    // Apply the captured world-to-minimap transform and bounded rim clamping.
     inline std::array<float, 2> Project(const Marker& marker, const std::array<float, 8>& transform)
     {
         const float dx = marker.x - transform[0], dz = marker.z - transform[1];

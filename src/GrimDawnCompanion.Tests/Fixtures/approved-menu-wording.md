@@ -11,12 +11,10 @@ with intentionally approved UI changes; do not update them merely to hide a fail
 | I3 | Affix help | Choose compatible prefixes and suffixes from the installed game data. Higher-tier affixes may increase item requirements. Select None to leave that affix unchanged from the base item. |
 | I4 | No compatible affixes | No compatible prefix or suffix options were found for this item. |
 | N1 | Page description | Track quest objectives and points of interest, or return to saved locations. |
-| N2 | Radar description | Show quest objectives and points of interest on a click-through overlay aligned with Grim Dawn's minimap. |
-| N3 | Automatic alignment | Automatically matches the minimap's position, size, zoom and rotation. No resolution preset is needed. |
-| N4 | Manual fallback | Turn off automatic alignment to adjust these saved manual settings. |
-| N5 | Range explanation | Automatic mode follows the game's minimap zoom and rotation. This range applies only to manual mode. |
-| N6 | Right-card heading | Fullscreen-Compatible Overlay |
-| N7 | Right-card description | Automatic mode draws markers and hover labels within Grim Dawn's interface. Alignment follows the game's resolution, interface scale and minimap each frame. The overlay hides when a supported minimap is unavailable. Manual mode use a separate overlay window. No game settings or save data are changed. |
+| N2 | Radar description | Show quest objectives and points of interest directly inside Grim Dawn's minimap. |
+| N3 | Native alignment | Native rendering follows the game's minimap position, size, zoom and rotation. |
+| N6 | Right-card heading | Native In-Game Rendering |
+| N7 | Right-card description | Markers and hover labels are drawn within Grim Dawn's interface. Alignment follows the game's resolution, interface scale and minimap each frame. Radar hides when a supported minimap is unavailable. No game settings or save data are changed. |
 | B1 | Save description | Save a named location for use across characters, difficulties and hardcore modes when the campaign map data matches. |
 | B2 | Persistence | Bookmarks are stored locally and remain available after restarting Companion or Grim Dawn. |
 | B3 | Compatibility note | Saved difficulty is for reference only. Any character can use a bookmark when the map data is compatible. |

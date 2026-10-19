@@ -14,16 +14,20 @@ internal static class MenuWordingRegression
         var respec=File.ReadAllText(Path.Combine(appDir,"MainWindow.MasteryAudit.cs"));
         var level=File.ReadAllText(Path.Combine(appDir,"MainWindow.CharacterLevel.cs"));
         var rows=Regex.Matches(approved,@"^\| ([A-Z]\d+) \| [^|]+ \| (.*?) \|\r?$",RegexOptions.Multiline);
-        require(rows.Count==41,"approved menu document contains all 41 description rows");
+        require(rows.Count==39,"approved menu document contains all 39 description rows");
         foreach(Match row in rows)
         {
             var text=row.Groups[2].Value.Trim();
             require(attributes.Contains(text) || source.Contains("\""+text+"\"") || viewModel.Contains("\""+text+"\""),
                 "approved menu wording applied: "+row.Groups[1].Value);
         }
-        var calibration=markup.Descendants().Single(e=>e.Name.LocalName=="Expander" &&
-            (string?)e.Attribute("Header")=="Advanced Calibration(Not Recommended)");
-        require((string?)calibration.Attribute("IsExpanded")=="False", "requested advanced calibration heading retains collapsed default");
+        var transparentWindows=Directory.GetFiles(appDir,"*.xaml")
+            .Select(XDocument.Load)
+            .Where(document=>document.Root?.Name.LocalName=="Window" &&
+                (string?)document.Root.Attribute("AllowsTransparency")=="True");
+        require(!transparentWindows.Any() && !attributes.Contains("Advanced Calibration(Not Recommended)") &&
+            !source.Contains("SetWindowPos(") && source.Contains("_bridge.SupportsNativeRadar"),
+            "obsolete transparent radar window and manual controls remain removed");
         require(attributes.Contains("Travel is supported between outdoor campaign areas. Bookmarks are blocked if their map data no longer matches."),"bookmark travel note follows the edited B6 wording, not the older review commentary");
         var howItWorks=attributes.Single(a=>a.StartsWith("• Distant active quest objectives"));
         var approvedBullets=approved.Split("## Radar bullets")[1]
@@ -42,4 +46,5 @@ internal static class MenuWordingRegression
         require(!File.ReadAllText(Path.Combine(appDir,"MainWindow.GameplayAssists.cs")).Contains("MessageBox") &&
             !source.Contains("\"Return to bookmarked position\", MessageBoxButton.YesNo"),"wording update does not add assist or bookmark-return confirmations");
     }
+
 }

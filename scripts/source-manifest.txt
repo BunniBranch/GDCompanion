@@ -61,8 +61,6 @@ src/GrimDawnCompanion.App/MainWindow.Licensing.cs
 src/GrimDawnCompanion.App/MainWindow.MasteryAudit.cs
 src/GrimDawnCompanion.App/MainWindow.xaml
 src/GrimDawnCompanion.App/MainWindow.xaml.cs
-src/GrimDawnCompanion.App/NavigationOverlayWindow.xaml
-src/GrimDawnCompanion.App/NavigationOverlayWindow.xaml.cs
 src/GrimDawnCompanion.App/app.manifest
 src/GrimDawnCompanion.CatalogBuilder/GrimDawnCompanion.CatalogBuilder.csproj
 src/GrimDawnCompanion.CatalogBuilder/Program.cs

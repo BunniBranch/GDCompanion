@@ -631,7 +631,7 @@ namespace
             const auto bytes = vector->begin && vector->end >= vector->begin
                 ? static_cast<unsigned long long>(vector->end - vector->begin) : 0;
             g_lastQuestCount.store(bytes / sizeof(void*), std::memory_order_relaxed);
-            // The external radar only observes game-owned results. Filter 1 is
+            // Radar capture only observes game-owned results. Filter 1 is
             // the active list and filter 4 is the game's tracked subset. No
             // filter or quest object is changed for radar capture.
             if (g_captureActiveQuests.load(std::memory_order_relaxed) && (filter == 1 || filter == 4) && g_getQuestFileName &&

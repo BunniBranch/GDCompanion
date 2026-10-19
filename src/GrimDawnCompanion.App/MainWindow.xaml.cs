@@ -28,8 +28,8 @@ public partial class MainWindow : Window
     private GameInstallation? _game;
     private CatalogDocument? _document;
     private WorldMarkerCatalog? _navigationCatalog;
-    private NavigationOverlayWindow? _navigationOverlay;
     private DispatcherTimer? _navigationTimer;
+    private const double NavigationCatalogRange = 48;
     private IReadOnlyList<string> _activeQuestPaths = [];
     private QuestNavigationState _questNavigationState = new();
     private bool _questStageDataReady;
@@ -143,14 +143,6 @@ public partial class MainWindow : Window
             NavigationPoiBox.IsChecked = _settings.ShowPointOfInterestMarkers;
             foreach (var box in PoiTypesPanel.Children.OfType<CheckBox>())
                 box.IsChecked = (_settings.EnabledPoiTypes & Enum.Parse<PoiFilter>((string)box.Tag)) != 0;
-            NavigationAutomaticBox.IsChecked = _settings.AutomaticNavigationAlignment;
-            NavigationManualPanel.IsEnabled = !_settings.AutomaticNavigationAlignment;
-            NavigationRangeSlider.IsEnabled = !_settings.AutomaticNavigationAlignment;
-            NavigationHorizontalOffsetSlider.Value = _settings.NavigationOverlayOffsetX;
-            NavigationVerticalOffsetSlider.Value = _settings.NavigationOverlayOffsetY;
-            NavigationScaleSlider.Value = _settings.NavigationOverlayScale;
-            NavigationRangeSlider.Value = _settings.NavigationOverlayRange;
-            UpdateNavigationAlignmentLabels();
             _settingsLoaded = true;
             _game = GameLocator.Locate(_settings.GameDirectory);
             if (_game is null)
@@ -647,26 +639,24 @@ public partial class MainWindow : Window
     {
         UpdateMasteryAuditUi();
         UpdateBookmarkUi();
-        var available = _bridge.IsConnected && _bridge.SupportsNavigationOverlay && _navigationCatalog is not null;
+        var available = _bridge.IsConnected && _bridge.SupportsNativeRadar && _navigationCatalog is not null;
         _viewModel.NavigationAvailable = available;
         NavigationToggleButton.IsEnabled = available && !_navigationBusy;
         NavigationQuestBox.IsEnabled = available && !_navigationBusy;
         NavigationPoiBox.IsEnabled = available && !_navigationBusy;
-        NavigationToggleButton.Content = _viewModel.NavigationActive ? "Disable Radar Overlay" : "Enable Radar Overlay";
+        NavigationToggleButton.Content = _viewModel.NavigationActive ? "Disable In-Game Radar" : "Enable In-Game Radar";
         NavigationToggleButton.Background = (Brush)FindResource(_viewModel.NavigationActive ? "Danger" : "Accent");
         NavigationToggleButton.Foreground = _viewModel.NavigationActive ? Brushes.White : (Brush)FindResource("AccentForeground");
         NavigationStatusDot.Fill = (Brush)FindResource(_viewModel.NavigationActive ? "Accent" : "SecondaryText");
         _viewModel.NavigationStatusText = _navigationBusy ? "Updating the radar filters…" :
-            _viewModel.NavigationActive ? "Active — the click-through radar appears while Grim Dawn is in the foreground." :
+            _viewModel.NavigationActive ? "Active — markers are rendered inside Grim Dawn while its minimap is visible." :
             available ? $"Ready — {_navigationCatalog!.Markers.Count:N0} installed locations indexed." :
-            _bridge.IsConnected ? "The overlay reader or installed navigation catalog is unavailable for this game build." :
-            "Connect to Grim Dawn to enable the external radar overlay.";
+            _bridge.IsConnected ? "Native in-game radar is unavailable for this game build." :
+            "Connect to Grim Dawn to enable the in-game radar.";
     }
 
     private void StartNavigationOverlay()
     {
-        _navigationOverlay ??= new NavigationOverlayWindow();
-        if (!_navigationOverlay.IsVisible) _navigationOverlay.Show();
         _navigationPollCount = 0;
         _nativeRadarContext = 0;
         _nativeRadarSubmitted = false;
@@ -721,7 +711,7 @@ public partial class MainWindow : Window
                 _activeQuestPaths = nextQuestState.Tasks.Keys.ToArray();
                 var catalogObjectives = NavigationOverlayProjection.Build(player, _navigationCatalog.Markers,
                     _activeQuestPaths, NavigationQuestBox.IsChecked == true, false,
-                    _settings.NavigationOverlayRange, _currentLevelPath, questState: nextQuestState);
+                    NavigationCatalogRange, _currentLevelPath, questState: nextQuestState);
                 NavigationQuestDiagnosticsText.Text = NavigationQuestBox.IsChecked != true
                     ? "Quest objectives are off."
                     : !_bridge.SupportsLiveQuestTasks
@@ -732,85 +722,52 @@ public partial class MainWindow : Window
                 _liveMapMarkers = await _bridge.GetLiveMapMarkersAsync(_lifetime.Token);
                 var region = NavigationOverlayProjection.ResolveRegionFamily(_currentLevelPath) ??
                              NavigationOverlayProjection.ResolveCurrentRegionFamily(
-                                 player, _navigationCatalog.Markers, _settings.NavigationOverlayRange);
+                                 player, _navigationCatalog.Markers, NavigationCatalogRange);
                 _regionalQuestMarkers = _questMarkerCache.Update(region, _activeQuestPaths, _liveMapMarkers, player,
-                    Math.Max(120, _settings.NavigationOverlayRange * 1.75));
+                    Math.Max(120, NavigationCatalogRange * 1.75));
             }
             // Fetch the coherent render frame last, after slower quest/catalog queries.
-            _minimapGeometry = _settings.AutomaticNavigationAlignment
-                ? await _bridge.GetMinimapFrameAsync(_lifetime.Token) : null;
+            _minimapGeometry = await _bridge.GetMinimapFrameAsync(_lifetime.Token);
             var liveMarkers = _liveMapMarkers.Where(marker => marker.Type != 21)
                 .Concat(_regionalQuestMarkers)
                 .Select(ToOverlayMarker);
-            if (_settings.AutomaticNavigationAlignment && _bridge.SupportsNativeRadar)
+            if (_minimapGeometry?.Projection is null || _minimapGeometry.RenderContext == 0)
             {
-                _navigationOverlay?.Hide(); // One renderer only, in every display mode.
-                if (_minimapGeometry?.Projection is null || _minimapGeometry.RenderContext == 0)
-                {
-                    if (_nativeRadarSubmitted) await _bridge.ClearNativeRadarAsync(_lifetime.Token);
-                    _nativeRadarSubmitted = false;
-                    NavigationAlignmentStatusText.Text = "Waiting for a supported visible minimap; in-game radar hidden.";
-                    _viewModel.NavigationStatusText = "Radar enabled — waiting for the game's minimap.";
-                    return;
-                }
-                if (_nativeRadarContext != 0 && _nativeRadarContext != _minimapGeometry.RenderContext)
-                {
-                    await _bridge.ClearNativeRadarAsync(_lifetime.Token);
-                    _nativeRadarContext = _minimapGeometry.RenderContext;
-                    _nativeRadarSubmitted = false;
-                    _navigationPollCount = 0; // Refresh map/quest selection before using the new render context.
-                    return;
-                }
-                _nativeRadarContext = _minimapGeometry.RenderContext;
-                if (!_nativeRadarSubmitted || _navigationPollCount % 3 == 1)
-                {
-                    var selected = NavigationOverlayProjection.Build(player, _navigationCatalog.Markers.Concat(liveMarkers), _activeQuestPaths,
-                        NavigationQuestBox.IsChecked == true, NavigationPoiBox.IsChecked == true, _settings.NavigationOverlayRange,
-                        _currentLevelPath, _minimapGeometry.Projection, _questNavigationState, _settings.EnabledPoiTypes);
-                    await _bridge.SetNativeRadarFrameAsync(_nativeRadarContext, selected, _lifetime.Token);
-                    _nativeRadarSubmitted = true;
-                }
-                NavigationAlignmentStatusText.Text = $"In-game rendering • minimap {_minimapGeometry.Width:0} px • fullscreen and windowed modes";
-                if (_navigationPollCount % 15 == 1)
-                {
-                    var native = await _bridge.GetNativeRadarStatusAsync(_lifetime.Token);
-                    _viewModel.NavigationStatusText = native.Rendering
-                        ? $"Active — {native.Drawn} markers rendered inside Grim Dawn."
-                        : "Radar enabled — waiting for a foreground game render.";
-                    if (NavigationQuestBox.IsChecked == true && !_bridge.SupportsLiveQuestTasks)
-                        _viewModel.NavigationStatusText += " Restart Grim Dawn and reconnect for reliable long-range quest stages.";
-                    else if (NavigationQuestBox.IsChecked == true && !_questStageDataReady)
-                        _viewModel.NavigationStatusText += " Waiting for tracked quest stages; nearby stars only.";
-                }
+                if (_nativeRadarSubmitted) await _bridge.ClearNativeRadarAsync(_lifetime.Token);
+                _nativeRadarSubmitted = false;
+                NavigationAlignmentStatusText.Text = "Waiting for a supported visible minimap; in-game radar hidden.";
+                _viewModel.NavigationStatusText = "Radar enabled — waiting for the game's minimap.";
                 return;
             }
-            if (_nativeRadarSubmitted)
+            if (_nativeRadarContext != 0 && _nativeRadarContext != _minimapGeometry.RenderContext)
             {
                 await _bridge.ClearNativeRadarAsync(_lifetime.Token);
+                _nativeRadarContext = _minimapGeometry.RenderContext;
                 _nativeRadarSubmitted = false;
+                _navigationPollCount = 0; // Refresh map/quest selection before using the new render context.
+                return;
             }
-            var markerCount = _navigationOverlay?.UpdateOverlay(player, _navigationCatalog.Markers.Concat(liveMarkers), _activeQuestPaths,
-                NavigationQuestBox.IsChecked == true, NavigationPoiBox.IsChecked == true, _bridge.ProcessId,
-                _settings.NavigationOverlayOffsetX, _settings.NavigationOverlayOffsetY, _settings.NavigationOverlayScale,
-                _settings.NavigationOverlayRange, _currentLevelPath, _settings.AutomaticNavigationAlignment, _minimapGeometry, _questNavigationState, _settings.EnabledPoiTypes);
-            NavigationAlignmentStatusText.Text = _settings.AutomaticNavigationAlignment && !_bridge.SupportsMinimapProjection
-                ? "Automatic zoom matching requires the new bridge and a supported game build. Restart the game and reconnect, or use Advanced manual calibration."
-                : _navigationOverlay?.AlignmentStatus ?? "Waiting for the game's minimap.";
-            if (!_bridge.SupportsNativeRadar)
-                NavigationAlignmentStatusText.Text += " External-window fallback: Fullscreen requires the latest supported bridge; restart Grim Dawn and reconnect.";
-            if (_navigationPollCount % 15 == 1 && markerCount is int drawn)
+            _nativeRadarContext = _minimapGeometry.RenderContext;
+            if (!_nativeRadarSubmitted || _navigationPollCount % 3 == 1)
             {
-                var liveQuests = _liveMapMarkers.Count(marker => marker.Type == 21);
-                var cachedQuests = Math.Max(0, _regionalQuestMarkers.Count - liveQuests);
-                var livePoints = _liveMapMarkers.Count - liveQuests;
-                _viewModel.NavigationStatusText = $"Active — {drawn} drawn • {liveQuests} live quest • {cachedQuests} regional quest • {livePoints} live POI • player X {player.X:0.0}, Z {player.Z:0.0}.";
-                if (NavigationQuestBox.IsChecked == true && !_questStageDataReady)
-                    _viewModel.NavigationStatusText += _bridge.SupportsQuestTasks
-                        ? " Waiting for tracked quest stages; nearby stars only."
-                        : " Restart Grim Dawn and reconnect to enable long-range quest stages.";
+                var selected = NavigationOverlayProjection.Build(player, _navigationCatalog.Markers.Concat(liveMarkers), _activeQuestPaths,
+                    NavigationQuestBox.IsChecked == true, NavigationPoiBox.IsChecked == true, NavigationCatalogRange,
+                    _currentLevelPath, _minimapGeometry.Projection, _questNavigationState, _settings.EnabledPoiTypes);
+                await _bridge.SetNativeRadarFrameAsync(_nativeRadarContext, selected, _lifetime.Token);
+                _nativeRadarSubmitted = true;
             }
-            else if (_navigationPollCount % 15 == 1 && markerCount is null)
-                _viewModel.NavigationStatusText = "Radar enabled — overlay hidden while the game or a supported minimap is not visible. Use Borderless Windowed for the external overlay.";
+            NavigationAlignmentStatusText.Text = $"In-game rendering • minimap {_minimapGeometry.Width:0} px • fullscreen and windowed modes";
+            if (_navigationPollCount % 15 == 1)
+            {
+                var native = await _bridge.GetNativeRadarStatusAsync(_lifetime.Token);
+                _viewModel.NavigationStatusText = native.Rendering
+                    ? $"Active — {native.Drawn} markers rendered inside Grim Dawn."
+                    : "Radar enabled — waiting for a foreground game render.";
+                if (NavigationQuestBox.IsChecked == true && !_bridge.SupportsLiveQuestTasks)
+                    _viewModel.NavigationStatusText += " Restart Grim Dawn and reconnect for reliable long-range quest stages.";
+                else if (NavigationQuestBox.IsChecked == true && !_questStageDataReady)
+                    _viewModel.NavigationStatusText += " Waiting for tracked quest stages; nearby stars only.";
+            }
         }
         catch (OperationCanceledException) { }
         catch
@@ -831,7 +788,6 @@ public partial class MainWindow : Window
         }
         _nativeRadarSubmitted = false;
         _nativeRadarContext = 0;
-        _navigationOverlay?.Hide();
         NavigationQuestDiagnosticsText.Text = "";
         _activeQuestPaths = [];
         _liveMapMarkers = [];
@@ -903,55 +859,6 @@ public partial class MainWindow : Window
         catch (Exception ex) { MessageBox.Show(ex.Message, "Could not save setting", MessageBoxButton.OK, MessageBoxImage.Warning); }
     }
 
-    private async void NavigationAlignmentModeChanged(object sender, RoutedEventArgs e)
-    {
-        if (!_settingsLoaded) return;
-        _settings.AutomaticNavigationAlignment = NavigationAutomaticBox.IsChecked == true;
-        NavigationManualPanel.IsEnabled = !_settings.AutomaticNavigationAlignment;
-        NavigationRangeSlider.IsEnabled = !_settings.AutomaticNavigationAlignment;
-        _minimapGeometry = null;
-        _navigationPollCount = 0;
-        NavigationAlignmentStatusText.Text = _settings.AutomaticNavigationAlignment
-            ? "Waiting for the game's live minimap bounds." : "Manual calibration enabled.";
-        try { await _settings.SaveAsync(); }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "Could not save alignment mode", MessageBoxButton.OK, MessageBoxImage.Warning); }
-    }
-
-    private async void NavigationOverlaySettingChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        if (!_settingsLoaded) return;
-        _settings.NavigationOverlayOffsetX = NavigationHorizontalOffsetSlider.Value;
-        _settings.NavigationOverlayOffsetY = NavigationVerticalOffsetSlider.Value;
-        _settings.NavigationOverlayScale = NavigationScaleSlider.Value;
-        _settings.NavigationOverlayRange = NavigationRangeSlider.Value;
-        UpdateNavigationAlignmentLabels();
-        try { await _settings.SaveAsync(); }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "Could not save overlay alignment", MessageBoxButton.OK, MessageBoxImage.Warning); }
-    }
-
-    private async void ResetNavigationOverlayAlignment(object sender, RoutedEventArgs e)
-    {
-        _settingsLoaded = false;
-        NavigationHorizontalOffsetSlider.Value = 0;
-        NavigationVerticalOffsetSlider.Value = 0;
-        NavigationScaleSlider.Value = 1;
-        _settings.NavigationOverlayOffsetX = 0;
-        _settings.NavigationOverlayOffsetY = 0;
-        _settings.NavigationOverlayScale = 1;
-        UpdateNavigationAlignmentLabels();
-        _settingsLoaded = true;
-        try { await _settings.SaveAsync(); }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "Could not save overlay alignment", MessageBoxButton.OK, MessageBoxImage.Warning); }
-    }
-
-    private void UpdateNavigationAlignmentLabels()
-    {
-        NavigationHorizontalOffsetText.Text = $"{NavigationHorizontalOffsetSlider.Value:+0;-0;0} px";
-        NavigationVerticalOffsetText.Text = $"{NavigationVerticalOffsetSlider.Value:+0;-0;0} px";
-        NavigationScaleText.Text = $"{NavigationScaleSlider.Value:0.00}×";
-        NavigationRangeText.Text = $"{NavigationRangeSlider.Value:0} u";
-    }
-
     private async void CloseCompanion(object? sender, CancelEventArgs e)
     {
         if (_shutdownComplete) return;
@@ -963,8 +870,6 @@ public partial class MainWindow : Window
         try
         {
             _navigationTimer?.Stop();
-            _navigationOverlay?.Close();
-            _navigationOverlay = null;
             _viewModel.NavigationActive = false;
             // Cancel any in-flight radar read before attempting the shutdown
             // handshake. Otherwise a dead game can leave that read holding the
@@ -1031,12 +936,6 @@ internal sealed class AppSettings
     public bool ShowActiveQuestMarkers { get; set; } = true;
     public bool ShowPointOfInterestMarkers { get; set; } = true;
     public PoiFilter EnabledPoiTypes { get; set; } = PoiFilter.All;
-    public double NavigationOverlayOffsetX { get; set; }
-    public bool AutomaticNavigationAlignment { get; set; } = true;
-    public double NavigationOverlayOffsetY { get; set; }
-    public double NavigationOverlayScale { get; set; } = 1;
-    public double NavigationOverlayRange { get; set; } = 48;
-    public int? NavigationProjectionVersion { get; set; }
 
     public static async Task<AppSettings> LoadAsync()
     {
@@ -1044,20 +943,11 @@ internal sealed class AppSettings
         {
             if (File.Exists(PathName))
             {
-                var settings = JsonSerializer.Deserialize<AppSettings>(await File.ReadAllTextAsync(PathName)) ?? new();
-                if (settings.NavigationProjectionVersion is null or < 3)
-                {
-                    // Projection v3 uses Grim Dawn's measured diagonal X/Z
-                    // basis. Older range values described a different axis
-                    // model and cannot be carried over meaningfully.
-                    settings.NavigationOverlayRange = 48;
-                    settings.NavigationProjectionVersion = 3;
-                }
-                return settings;
+                return JsonSerializer.Deserialize<AppSettings>(await File.ReadAllTextAsync(PathName)) ?? new();
             }
         }
         catch { }
-        return new AppSettings { NavigationProjectionVersion = 3 };
+        return new AppSettings();
     }
 
     public async Task SaveAsync()
