@@ -174,5 +174,27 @@ int main()
     Reset(); devotionSpent = 0; devotionPoints = devotionEarned; affinityValue = binding = 0;
     Run("PREPARE",output); Run("COMMIT",output);
     Require(strstr(output,"OK FULL_RESPEC_RESET") && !devotionChanges && classChanges == 1,"already unassigned devotions are preserved without a second refund");
+
+    struct FakeSkill { unsigned char pad[0x4A4]{}; };
+    FakeSkill passiveStar{}, leveledCelestial{}, unallocatedCelestial{}, regularSkill{};
+    *reinterpret_cast<unsigned int*>(passiveStar.pad + 0xC8) = 1;
+    *reinterpret_cast<unsigned int*>(passiveStar.pad + 0x4A0) = 2;
+    *reinterpret_cast<unsigned int*>(leveledCelestial.pad + 0xC8) = 1;
+    *reinterpret_cast<unsigned int*>(leveledCelestial.pad + 0xD0) = 5;
+    *reinterpret_cast<unsigned int*>(leveledCelestial.pad + 0x4A0) = 3;
+    *reinterpret_cast<unsigned int*>(unallocatedCelestial.pad + 0xC8) = 0;
+    *reinterpret_cast<unsigned int*>(unallocatedCelestial.pad + 0xD0) = 5;
+    *reinterpret_cast<unsigned int*>(unallocatedCelestial.pad + 0x4A0) = 3;
+    *reinterpret_cast<unsigned int*>(regularSkill.pad + 0xC8) = 12;
+    *reinterpret_cast<unsigned int*>(regularSkill.pad + 0x4A0) = 0;
+    void* fakeList[] = { &passiveStar, &leveledCelestial, &unallocatedCelestial, &regularSkill };
+    static MasteryRespec::VectorView fakeView{ fakeList, fakeList + 4, fakeList + 4 };
+    MasteryRespec::skills = [](void*)->const MasteryRespec::VectorView* { return &fakeView; };
+    MasteryRespec::rank = [](void* s)->unsigned int
+    {
+        return *reinterpret_cast<const unsigned int*>(static_cast<const unsigned char*>(s) + 0xC8);
+    };
+    Require(MasteryRespec::ReadDevotionSpent(&fakeView) == 2,
+        "ReadDevotionSpent counts invested devotion ranks and ignores celestial XP level");
     return 0;
 }
