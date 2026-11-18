@@ -181,13 +181,20 @@ namespace GameplayAssists
             { "?StartCooldown@Skill@GAME@@QEAAX_N@Z", reinterpret_cast<void*>(&StartHook), reinterpret_cast<void**>(&originalStart), 0x47CBF0, 0xF14F8020 },
             { "?SubtractMana@Character@GAME@@QEAAXM@Z", reinterpret_cast<void*>(&SubtractHook), reinterpret_cast<void**>(&originalSubtract), 0x68A40, 0xDF88BBF1 }
         };
-        const Hook currentHooks[] = {
+        const Hook v1311Hooks[] = {
             { "?IsInvincible@Player@GAME@@UEBA_NXZ", reinterpret_cast<void*>(&InvincibleHook), reinterpret_cast<void**>(&originalInvincible), 0x3CE800, 0x4B72C206 },
             { "?GetRunSpeed@Character@GAME@@QEAA?BM_N@Z", reinterpret_cast<void*>(&SpeedHook), reinterpret_cast<void**>(&originalSpeed), 0x69040, 0xE269847B },
             { "?StartCooldown@Skill@GAME@@QEAAX_N@Z", reinterpret_cast<void*>(&StartHook), reinterpret_cast<void**>(&originalStart), 0x4916B0, 0xF14F8020 },
             { "?SubtractMana@Character@GAME@@QEAAXM@Z", reinterpret_cast<void*>(&SubtractHook), reinterpret_cast<void**>(&originalSubtract), 0x68BA0, 0xDF88BBF1 }
         };
-        const Hook* hooks = build == SupportedBuilds::Build::V1311 ? currentHooks : oldHooks;
+        const Hook currentHooks[] = {
+            { "?IsInvincible@Player@GAME@@UEBA_NXZ", reinterpret_cast<void*>(&InvincibleHook), reinterpret_cast<void**>(&originalInvincible), 0x3CDE70, 0xF6DAF8F3 },
+            { "?GetRunSpeed@Character@GAME@@QEAA?BM_N@Z", reinterpret_cast<void*>(&SpeedHook), reinterpret_cast<void**>(&originalSpeed), 0x69040, 0xE269847B },
+            { "?StartCooldown@Skill@GAME@@QEAAX_N@Z", reinterpret_cast<void*>(&StartHook), reinterpret_cast<void**>(&originalStart), 0x490DA0, 0xF14F8020 },
+            { "?SubtractMana@Character@GAME@@QEAAXM@Z", reinterpret_cast<void*>(&SubtractHook), reinterpret_cast<void**>(&originalSubtract), 0x68BA0, 0xDF88BBF1 }
+        };
+        const Hook* hooks = build == SupportedBuilds::Build::V1312 ? currentHooks
+            : (build == SupportedBuilds::Build::V1311 ? v1311Hooks : oldHooks);
         void* targets[4]{};
         for (unsigned i = 0; i < 4; ++i)
         {

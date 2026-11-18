@@ -103,6 +103,28 @@ public sealed class CompatibilityService
         new("Game.dll", "?StartCooldown@Skill@GAME@@QEAAX_N@Z", "Skill::StartCooldown(bool)", false),
         new("Game.dll", "?EndCooldown@Skill@GAME@@UEAAXH@Z", "Skill::EndCooldown(int)", false),
         new("Game.dll", "?RefreshCooldown@SkillManager@GAME@@UEAAXH@Z", "SkillManager::RefreshCooldown(int)", false),
+        new("Game.dll", "?GetUI@GameEngine@GAME@@QEBAPEAVGameUIInterface@2@XZ", "Mastery respec UI interface", false),
+        new("Game.dll", "?GetSkillManager@Character@GAME@@QEAAAEAVSkillManager@2@XZ", "Mastery respec skill manager", false),
+        new("Game.dll", "?GetSkillList@SkillManager@GAME@@QEBAAEBV?$vector@PEAVSkill@GAME@@@mem@@XZ", "Mastery respec skill list", false),
+        new("Game.dll", "?GetItemSkillList@SkillManager@GAME@@QEBAAEBV?$vector@PEAVSkill@GAME@@@mem@@XZ", "Mastery respec item skill guard", false),
+        new("Game.dll", "?GetSkillLevel@Skill@GAME@@QEBA?BIXZ", "Mastery respec skill rank", false),
+        new("Game.dll", "?GetDevotionExperience@Skill@GAME@@QEBA?BIXZ", "Mastery respec devotion XP", false),
+        new("Game.dll", "?GetDevotionLevel@Skill@GAME@@QEBA?BIXZ", "Mastery respec devotion level", false),
+        new("Game.dll", "?GetDevotionParent@Skill@GAME@@QEBA?BIXZ", "Mastery respec devotion parent", false),
+        new("Game.dll", "?GetAutoCastSkill@Skill@GAME@@QEBAPEAV12@XZ", "Mastery respec devotion binding", false),
+        new("Game.dll", "?GetNumDevotionPointsSpent@SkillManager@GAME@@QEBAIXZ", "Mastery respec devotion spent", false),
+        new("Game.dll", "?GetTotalDevotionPoints@Character@GAME@@QEBA?BIXZ", "Mastery respec devotion earned", false),
+        new("Game.dll", "?GetMaxDevotionPoints@Character@GAME@@QEBA?BIXZ", "Mastery respec devotion cap", false),
+        new("Game.dll", "?GetAffinity@Character@GAME@@QEBA?BIW4AffinityType@2@@Z", "Mastery respec affinity", false),
+        new("Game.dll", "?DecrementSkillLevel@Skill@GAME@@UEAA_NI@Z", "Mastery respec rank decrement", false),
+        new("Game.dll", "?GetMasteryId@Skill@GAME@@QEBA?BIXZ", "Mastery respec mastery id", false),
+        new("Game.dll", "?IsSkillTheMasterySkill@Skill@GAME@@QEBA?B_NXZ", "Mastery respec mastery bar check", false),
+        new("Game.dll", "?IsDefaultSkill@SkillManager@GAME@@QEBA_NI@Z", "Mastery respec default skill guard", false),
+        new("Game.dll", "?GetSkillSet@Skill@GAME@@QEBAHXZ", "Mastery respec skill set", false),
+        new("Game.dll", "?GetSkillMasteriesActive@Character@GAME@@QEBA?BIXZ", "Mastery respec active classes", false),
+        new("Game.dll", "?GetSkillMasteriesAllowed@Character@GAME@@QEBA?BIXZ", "Mastery respec allowed classes", false),
+        new("Game.dll", "?GetNumRegularSkillPoints@SkillManager@GAME@@QEBAIXZ", "Mastery respec regular points", false),
+        new("Game.dll", "?GetNumMasteryPoints@SkillManager@GAME@@QEBAIXZ", "Mastery respec mastery points", false),
     ];
 
     // The 32-bit release intentionally exposes only the audited Lua bridge.
@@ -153,6 +175,22 @@ public sealed class CompatibilityService
                 valid, found?.Rva ?? 0, found?.Section ?? "—",
                 found is null ? "" : Hashing.Sha256Bytes(found.Prologue),
                 found is null ? "Export not found" : valid ? $"Resolved by exported name and verified in {(definition.Executable ? "executable" : "readable data")} memory" : "Export did not pass section/body validation"));
+        }
+
+        if (game.Architecture == GameArchitecture.X64)
+        {
+            var exeReader = new PeExportReader(game.ExecutablePath);
+            var engineReader = readers["Engine.dll"];
+            var gameReader = readers["Game.dll"];
+            var matchedBuild = MatchAuditedX64Build(exeReader, engineReader, gameReader);
+            var buildIdentity = $"{exeReader.TimeDateStamp:X8}:{exeReader.SizeOfImage:X}/{engineReader.TimeDateStamp:X8}:{engineReader.SizeOfImage:X}/{gameReader.TimeDateStamp:X8}:{gameReader.SizeOfImage:X}";
+            symbols.Add(new(
+                "Grim Dawn.exe", "PE:SupportedBuilds", "Audited x64 build identity (V1308/V1311/V1312)", false,
+                matchedBuild is not null, 0, "PE",
+                buildIdentity,
+                matchedBuild is not null
+                    ? $"Matched audited x64 build {matchedBuild}"
+                    : "Unknown or mismatched PE build identity; build-pinned features stay gated"));
         }
 
         var requiredFailed = symbols.Any(x => x.Required && !x.Found);
@@ -209,6 +247,15 @@ public sealed class CompatibilityService
                 return true;
         return false;
     }
+
+    private static string? MatchAuditedX64Build(PeExportReader exe, PeExportReader engine, PeExportReader game) =>
+        (exe.TimeDateStamp, exe.SizeOfImage, engine.TimeDateStamp, engine.SizeOfImage, game.TimeDateStamp, game.SizeOfImage) switch
+        {
+            (0x6A85FBEC, 0x482000, 0x6A85FB5B, 0x450000, 0x6A85FBB3, 0xAB5000) => "V1308",
+            (0x6AC7F680, 0x482000, 0x6AC7F5F7, 0x450000, 0x6AC7F64B, 0xAE6000) => "V1311",
+            (0x6AF77535, 0x485000, 0x6AF7742E, 0x450000, 0x6AF774A6, 0xAE5000) => "V1312",
+            _ => null,
+        };
 
     private sealed record SymbolDefinition(string Module, string Name, string FriendlyName, bool Required,
         bool Executable = true, Func<byte[], bool>? Validator = null);

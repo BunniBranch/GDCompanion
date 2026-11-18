@@ -83,6 +83,15 @@ namespace MasteryGameUi
                 selectedPaneVtableRva = 0x31BD48; emptyPaneVtableRva = 0x31A220;
                 resetRva = 0x21B1F0; setPaneRva = 0x27C720;
             }
+            else if (build == SupportedBuilds::Build::V1312 &&
+                Fingerprint(0x18CDB0, 0x451, 0x23DD0DE210043C23ULL) &&
+                Fingerprint(0x27D360, 0x161, 0x6273DDC9F0D7A75BULL) &&
+                Fingerprint(0x21B470, 0xC, 0xD3A693817C11AC62ULL))
+            {
+                uiVtableRva = 0x31B668; skillWindowVtableRva = 0x31E990; devotionVtableRva = 0x316E60;
+                selectedPaneVtableRva = 0x31CDE8; emptyPaneVtableRva = 0x31B2C0;
+                resetRva = 0x21B470; setPaneRva = 0x27D360;
+            }
             available = getUi && rank && experience && devotionLevel && parent && autoCast &&
                 dos->e_magic == IMAGE_DOS_SIGNATURE && pe->Signature == IMAGE_NT_SIGNATURE &&
                 uiVtableRva && skillWindowVtableRva && devotionVtableRva && selectedPaneVtableRva &&

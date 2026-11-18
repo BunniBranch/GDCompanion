@@ -67,6 +67,13 @@ namespace MinimapProjection
                 renderRva = 0x1769A0;
                 mapVtableRva = 0x3159E0;
             }
+            else if (build == SupportedBuilds::Build::V1312 &&
+                Fingerprint(0x176C10, 0x410, 0xE1F7913DBFDD2586ULL) &&
+                Fingerprint(0x175F70, 0x470, 0x34500D8D8917A636ULL))
+            {
+                renderRva = 0x176C10;
+                mapVtableRva = 0x316A90;
+            }
             supported = project && worldCtor && worldPosition && renderRva && mapVtableRva &&
                 dos->e_magic == IMAGE_DOS_SIGNATURE && pe->Signature == IMAGE_NT_SIGNATURE;
         }
