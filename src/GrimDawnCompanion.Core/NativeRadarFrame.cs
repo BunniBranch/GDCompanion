@@ -6,6 +6,9 @@ namespace GrimDawnCompanion.Core;
 
 public static class NativeRadarFrame
 {
+    private const int MaxTooltipChars = 48;
+    private const int MaxLabelUtf8Bytes = 192;
+
     public static IReadOnlyList<string> Commands(ulong context, IEnumerable<NavigationOverlayPoint> points)
     {
         if (context == 0) throw new ArgumentOutOfRangeException(nameof(context));
@@ -20,19 +23,7 @@ public static class NativeRadarFrame
             if (!float.IsFinite(marker.WorldX) || !float.IsFinite(marker.WorldZ) ||
                 Math.Abs(marker.WorldX) > 1_000_000 || Math.Abs(marker.WorldZ) > 1_000_000)
                 throw new InvalidDataException("Invalid native radar position.");
-            var label = Regex.Replace(marker.DisplayName ?? marker.Category, @"\{[^}]*\}|[\p{Cc}\p{Cf}]", "");
-            label = label.Replace('^', ' ').Trim();
-            if (label.Length == 0) label = marker.Category;
-            if (marker.IsSpawnArea) label += " (possible spawn area)";
-            // Truncate at Unicode scalar boundaries, never halfway through UTF-8.
-            var bounded = new StringBuilder();
-            var bytes = 0;
-            foreach (var rune in label.EnumerateRunes())
-            {
-                if (bytes + rune.Utf8SequenceLength > 192) break;
-                bounded.Append(rune.ToString()); bytes += rune.Utf8SequenceLength;
-            }
-            var encoded = Convert.ToHexString(Encoding.UTF8.GetBytes(bounded.ToString()));
+            var encoded = Convert.ToHexString(Encoding.UTF8.GetBytes(FormatLabel(point)));
             var kind = marker.Category switch
             {
                 "Quest Objective" => 0, "Devotion Shrine" => 2, "Riftgate" or "Travel Utility" => 3,
@@ -45,6 +36,45 @@ public static class NativeRadarFrame
         if (batch.Length > prefix.Length) commands.Add(batch);
         commands.Add("RADAR\tCANVAS\tCOMMIT");
         return commands;
+    }
+
+    private static string FormatLabel(NavigationOverlayPoint point)
+    {
+        var marker = point.Marker;
+        var label = Regex.Replace(marker.DisplayName ?? marker.Category, @"\{[^}]*\}|[\p{Cc}\p{Cf}]", "");
+        label = label.Replace('^', ' ').Trim();
+        if (label.Length == 0) label = marker.Category;
+        var distanceText = double.IsFinite(point.Distance) && point.Distance >= 0 && point.Distance < 1_000_000
+            ? string.Create(CultureInfo.InvariantCulture, $"{(int)Math.Round(point.Distance, MidpointRounding.AwayFromZero)}m")
+            : null;
+        var suffix = (marker.IsSpawnArea, distanceText) switch
+        {
+            (true, { } d) => $" (possible spawn area, {d})",
+            (true, null) => " (possible spawn area)",
+            (false, { } d) => $" ({d})",
+            _ => ""
+        };
+        var suffixBytes = Encoding.UTF8.GetByteCount(suffix);
+        if (label.Length + suffix.Length <= MaxTooltipChars &&
+            Encoding.UTF8.GetByteCount(label) + suffixBytes <= MaxLabelUtf8Bytes)
+            return label + suffix;
+
+        const string ellipsis = "\u2026";
+        var maxPrefixChars = Math.Max(0, MaxTooltipChars - ellipsis.Length - suffix.Length);
+        var maxPrefixBytes = Math.Max(0, MaxLabelUtf8Bytes - Encoding.UTF8.GetByteCount(ellipsis) - suffixBytes);
+        var bounded = new StringBuilder();
+        var chars = 0;
+        var bytes = 0;
+        foreach (var rune in label.EnumerateRunes())
+        {
+            if (chars + rune.Utf16SequenceLength > maxPrefixChars ||
+                bytes + rune.Utf8SequenceLength > maxPrefixBytes)
+                break;
+            bounded.Append(rune.ToString());
+            chars += rune.Utf16SequenceLength;
+            bytes += rune.Utf8SequenceLength;
+        }
+        return bounded.Append(ellipsis).Append(suffix).ToString();
     }
 }
 

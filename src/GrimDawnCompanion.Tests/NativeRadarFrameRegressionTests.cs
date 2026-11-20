@@ -33,6 +33,30 @@ internal static class NativeRadarFrameRegressionTests
         var label = new UTF8Encoding(false, true).GetString(bytes);
         require(bytes.Length <= 192 && label.StartsWith("Questname ") && !label.Contains('{'),
             "native hover labels strip markup and controls without splitting Unicode characters");
+        string DecodeLabel(NavigationOverlayPoint item)
+        {
+            var encodedLabel = NativeRadarFrame.Commands(9, [item])[1].Split('\t')[3].Split(',')[3];
+            return new UTF8Encoding(false, true).GetString(Convert.FromHexString(encodedLabel));
+        }
+        var riftPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("rift", "Riftgate", "records/ui/riftgatemap/locations/riftgatea_devilscrossing.dbr", "Levels/Region0A001.lvl", 10, 0, 20, DisplayName: "Devil's Crossing Rift"),
+            244.6, 0, 0, true);
+        require(DecodeLabel(riftPoint) == "Devil's Crossing Rift (245m)",
+            "native hover labels append rounded meter distance after POI name");
+        var spawnPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("spawn", "Quest Objective", "records/balthazar.dbr", "Levels/Region0A001.lvl", 10, 0, 20, DisplayName: "Balthazar", IsSpawnArea: true),
+            87.2, 0, 0, false);
+        require(DecodeLabel(spawnPoint) == "Balthazar (possible spawn area, 87m)",
+            "native hover labels combine spawn-area note and rounded meter distance");
+        var longPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("long", "Quest Objective", "records/long.dbr", "Levels/Region0A001.lvl", 10, 0, 20, DisplayName: new string('A', 60)),
+            312.4, 0, 0, false);
+        var longLabel = DecodeLabel(longPoint);
+        require(longLabel.Length <= 48 && Encoding.UTF8.GetByteCount(longLabel) <= 192 && longLabel.EndsWith("\u2026 (312m)", StringComparison.Ordinal),
+            "native hover labels truncate oversized names while preserving distance suffix");
+        require(DecodeLabel(riftPoint with { Distance = double.NaN }) == "Devil's Crossing Rift" &&
+                DecodeLabel(riftPoint with { Distance = -5 }) == "Devil's Crossing Rift",
+            "native hover labels omit non-finite or negative distances");
         require(NativeRadarFrame.Commands(9, []).SequenceEqual(new[] { "RADAR\tCANVAS\tBEGIN\t9\t0", "RADAR\tCANVAS\tCOMMIT" }),
             "native empty frame explicitly clears previous targets");
         Reject(() => NativeRadarFrame.Commands(0, [point]));
