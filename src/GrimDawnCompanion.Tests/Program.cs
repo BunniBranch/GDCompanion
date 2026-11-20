@@ -455,6 +455,11 @@ if (game.Architecture == GameArchitecture.X64)
 var bookmarkSymbols = compatibility.Symbols.Where(x => x.FriendlyName.StartsWith("Bookmark ", StringComparison.Ordinal)).ToArray();
 Require(bookmarkSymbols.Length == 19 && bookmarkSymbols.All(x => x.Found && x.Fingerprint.Length == 64),
     "all persistent bookmark identity readiness and travel symbols resolve without executing game code");
+var masterySymbols = compatibility.Symbols.Where(x => x.FriendlyName.StartsWith("Mastery respec ", StringComparison.Ordinal)).ToArray();
+Require(masterySymbols.Length == 22 && masterySymbols.All(x => x.Found && x.Fingerprint.Length == 64),
+    "all mastery respec exports resolve for this game patch");
+Require(compatibility.Symbols.Any(x => x.DecoratedName == "PE:SupportedBuilds" && x.Found),
+    "installed x64 Grim Dawn build matches an audited SupportedBuilds PE identity");
 Require(!compatibility.Symbols.Any(x => x.FriendlyName == "GameEngine::SaveGame()"), "unused SaveGame export is not included in compatibility verification");
 Require(compatibility.Symbols.Any(x => x.FriendlyName == "Character::SetInvincible(bool)"), "invincibility export remains available for planned character utility support");
 Require(compatibility.Symbols.Any(x => x.FriendlyName == "GameEngine global instance" && x.Found), "native utility instance export is verified in readable data memory");
