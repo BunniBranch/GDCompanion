@@ -156,6 +156,8 @@ public static class ArcReader
             throw new InvalidDataException("ARC entry size does not match its parts.");
     }
 
+    internal static byte[] DecompressBlock(byte[] input, int expected) => Decompress(input, expected);
+
     private static byte[] Decompress(byte[] input, int expected)
     {
         try { return Lz4Block(input, expected); }

@@ -47,6 +47,7 @@ public sealed class WorldMarkerCatalogService
         var hashes = await Task.Run(() => archivePaths.Concat(questArchives).Select(path =>
             $"{Path.GetRelativePath(game.RootDirectory, path).Replace('\\', '/')}:{Hashing.Sha256File(path)}").ToArray(), cancellationToken);
         var fingerprint = Hashing.CombineFingerprint(hashes);
+        var riftgateNames = await Task.Run(() => ReadRiftgateDisplayNames(game, cancellationToken), cancellationToken);
         var allMarkers = new Dictionary<string, WorldMarkerRecord>(StringComparer.OrdinalIgnoreCase);
         foreach (var archivePath in archivePaths)
         {
@@ -61,7 +62,8 @@ public sealed class WorldMarkerCatalogService
                     ArcReader.CopyFirstEntryToStream(archivePath,
                         name => name.EndsWith("world001.map", StringComparison.OrdinalIgnoreCase), temporary);
                     temporary.Position = 0;
-                    foreach (var marker in ParsePrimaryPlacements(temporary, cancellationToken, questRecords)) allMarkers[marker.Id] = marker;
+                    foreach (var marker in ParsePrimaryPlacements(temporary, cancellationToken, questRecords, riftgateNames))
+                        allMarkers[marker.Id] = marker;
                 }, cancellationToken);
             }
             finally { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); }
@@ -103,14 +105,16 @@ public sealed class WorldMarkerCatalogService
     }
 
     internal static List<WorldMarkerRecord> ParsePrimaryPlacements(byte[] world, CancellationToken cancellationToken = default,
-        IReadOnlyDictionary<string, string[]>? questRecords = null)
+        IReadOnlyDictionary<string, string[]>? questRecords = null,
+        IReadOnlyDictionary<string, string>? riftgateNames = null)
     {
         using var stream = new MemoryStream(world, writable: false);
-        return ParsePrimaryPlacements(stream, cancellationToken, questRecords);
+        return ParsePrimaryPlacements(stream, cancellationToken, questRecords, riftgateNames);
     }
 
     internal static List<WorldMarkerRecord> ParsePrimaryPlacements(Stream world, CancellationToken cancellationToken = default,
-        IReadOnlyDictionary<string, string[]>? questRecords = null)
+        IReadOnlyDictionary<string, string[]>? questRecords = null,
+        IReadOnlyDictionary<string, string>? riftgateNames = null)
     {
         if (!world.CanSeek || world.Length < 8) throw new InvalidDataException("Compiled world map stream is invalid.");
         var header = ReadBytes(world, 0, 8);
@@ -128,7 +132,7 @@ public sealed class WorldMarkerCatalogService
         foreach (var level in levels)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            try { ParseLevel(world, level, markers, questRecords); }
+            try { ParseLevel(world, level, markers, questRecords, riftgateNames); }
             catch (Exception exception) when (exception is InvalidDataException or OverflowException or DecoderFallbackException)
             {
                 // A malformed embedded level must not prevent the remaining
@@ -207,7 +211,7 @@ public sealed class WorldMarkerCatalogService
     }
 
     private static void ParseLevel(Stream world, LevelEntry level, List<WorldMarkerRecord> output,
-        IReadOnlyDictionary<string, string[]>? questRecords)
+        IReadOnlyDictionary<string, string[]>? questRecords, IReadOnlyDictionary<string, string>? riftgateNames)
     {
         var offset = level.DataOffset;
         // The index scan may encounter incidental `.lvl` bytes. Reject those
@@ -226,13 +230,14 @@ public sealed class WorldMarkerCatalogService
             var dataStart = chunkCursor + 8;
             if (chunkSize > int.MaxValue || dataStart > levelEnd - chunkSize) return;
             if (chunkType == 5)
-                ParsePlacementChunk(world, dataStart, (int)chunkSize, level, output, questRecords);
+                ParsePlacementChunk(world, dataStart, (int)chunkSize, level, output, questRecords, riftgateNames);
             chunkCursor = dataStart + chunkSize;
         }
     }
 
     private static void ParsePlacementChunk(Stream world, long dataStart, int dataLength, LevelEntry level,
-        List<WorldMarkerRecord> output, IReadOnlyDictionary<string, string[]>? questRecords)
+        List<WorldMarkerRecord> output, IReadOnlyDictionary<string, string[]>? questRecords,
+        IReadOnlyDictionary<string, string>? riftgateNames)
     {
         var dataEnd = dataStart + dataLength;
         var stringCountRaw = ReadU32(ReadBytes(world, dataStart, 4), 0);
@@ -271,14 +276,14 @@ public sealed class WorldMarkerCatalogService
 
             var placement = ReadBytes(world, cursor, 56);
             var recordIndexRaw = ReadU32(placement, 0);
-            AddPlacement(strings, recordIndexRaw, placement, 40, level, output, questRecords);
+            AddPlacement(strings, recordIndexRaw, placement, 40, level, output, questRecords, riftgateNames);
             cursor += 56;
         }
     }
 
     private static void AddPlacement(string[] strings, uint recordIndexRaw, ReadOnlySpan<byte> placement,
         int coordinateOffset, LevelEntry level, List<WorldMarkerRecord> output,
-        IReadOnlyDictionary<string, string[]>? questRecords)
+        IReadOnlyDictionary<string, string[]>? questRecords, IReadOnlyDictionary<string, string>? riftgateNames)
     {
         if (recordIndexRaw >= (uint)strings.Length) return;
         var recordPath = strings[(int)recordIndexRaw].Replace('\\', '/');
@@ -292,8 +297,12 @@ public sealed class WorldMarkerCatalogService
         var z = ReadF32(placement, coordinateOffset + 8) + level.OriginZ;
         if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z)) return;
         var id = $"{level.Name}|{recordPath}|{BitConverter.SingleToUInt32Bits(x):x8}|{BitConverter.SingleToUInt32Bits(z):x8}";
-        output.Add(new WorldMarkerRecord(id, category, recordPath, level.Name, x, y, z, questPaths,
-            DisplayName(recordPath, category)));
+        var normalizedRecord = recordPath.TrimStart('/');
+        var displayName = category == "Riftgate" && riftgateNames is not null &&
+                          riftgateNames.TryGetValue(normalizedRecord, out var localizedRiftgate)
+            ? localizedRiftgate
+            : DisplayName(recordPath, category);
+        output.Add(new WorldMarkerRecord(id, category, recordPath, level.Name, x, y, z, questPaths, displayName));
     }
 
     private static Dictionary<string, string[]> ReadQuestRecordAssociations(GameInstallation game, IEnumerable<string> archives,
@@ -347,7 +356,8 @@ public sealed class WorldMarkerCatalogService
     {
         var record = path.ToLowerInvariant();
         if (record.Contains("devotionshrine")) return "Devotion Shrine";
-        if (record.StartsWith("records/interactive/") && record.Contains("riftgate")) return "Riftgate";
+        if ((record.StartsWith("records/interactive/") || record.StartsWith("records/ui/riftgatemap/locations/")) &&
+            record.Contains("riftgate")) return "Riftgate";
         if (record.StartsWith("records/items/lootchests/oneshotchests/")) return "One-Shot Chest";
         if (record.StartsWith("records/items/loreobjects/")) return "Lore Note";
         if (record.StartsWith("records/creatures/npcs/blacksmith")) return "Blacksmith";
@@ -371,6 +381,137 @@ public sealed class WorldMarkerCatalogService
         name = name.Replace('_', ' ').Replace('-', ' ').Trim();
         return name.Length == 0 ? "Quest objective" :
             System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(name.ToLowerInvariant());
+    }
+
+    private static Dictionary<string, string> ReadRiftgateDisplayNames(GameInstallation game, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var archives = GameLocator.GetInstalledArchives(game)
+            .Where(archive => archive.Id is "base" or "gdx1" or "gdx2" or "gdx3")
+            .ToArray();
+        var tags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var archive in archives)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(archive.TextPath) || !File.Exists(archive.TextPath) ||
+                new FileInfo(archive.TextPath).Length <= 2048)
+                continue;
+            try
+            {
+                foreach (var pair in ArcReader.ReadTags(archive.TextPath))
+                    tags[pair.Key] = pair.Value;
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested) { }
+        }
+        if (tags.Count == 0) return result;
+        foreach (var archive in archives)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try { ReadRiftgateTagsFromArz(archive.DatabasePath, tags, result, cancellationToken); }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested) { }
+        }
+        return result;
+    }
+
+    private static void ReadRiftgateTagsFromArz(string arzPath, IReadOnlyDictionary<string, string> tags,
+        Dictionary<string, string> output, CancellationToken cancellationToken)
+    {
+        using var stream = File.OpenRead(arzPath);
+        if (stream.Length < 24) return;
+        var header = ReadBytes(stream, 0, 24);
+        var magic = ReadU16(header, 0);
+        var version = ReadU16(header, 2);
+        var recordTableOffset = (long)ReadU32(header, 4);
+        var recordTableSize = (long)ReadU32(header, 8);
+        var recordCount = ReadU32(header, 12);
+        var stringTableOffset = (long)ReadU32(header, 16);
+        var stringTableSize = (long)ReadU32(header, 20);
+        if (magic is not (2 or 3) || version != 3) return;
+        if (recordTableOffset < 24 || recordTableSize < 4 || recordTableOffset > stream.Length - recordTableSize) return;
+        if (stringTableOffset < 24 || stringTableSize < 4 || stringTableOffset > stream.Length - stringTableSize) return;
+        if (stringTableSize > 64 * 1024 * 1024 || recordTableSize > 64 * 1024 * 1024) return;
+
+        var stringTable = ReadBytes(stream, stringTableOffset, (int)stringTableSize);
+        var stringCount = ReadU32(stringTable, 0);
+        if (stringCount > 2_000_000) return;
+        var strings = new string[stringCount];
+        var sc = 4;
+        for (uint i = 0; i < stringCount; i++)
+        {
+            if (sc > stringTable.Length - 4) return;
+            var len = ReadU32(stringTable, sc);
+            sc += 4;
+            if (len > stringTable.Length - sc) return;
+            strings[i] = Encoding.Latin1.GetString(stringTable, sc, (int)len);
+            sc += (int)len;
+        }
+
+        var recordTable = ReadBytes(stream, recordTableOffset, (int)recordTableSize);
+        var rc = 0;
+        for (uint i = 0; i < recordCount; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (rc > recordTable.Length - 28) return;
+            var nameId = ReadU32(recordTable, rc); rc += 4;
+            var typeLen = ReadU32(recordTable, rc); rc += 4;
+            if (typeLen > recordTable.Length - rc - 20) return;
+            rc += (int)typeLen;
+            var dataOffset = (long)ReadU32(recordTable, rc); rc += 4;
+            var compressedSize = ReadU32(recordTable, rc); rc += 4;
+            var uncompressedSize = ReadU32(recordTable, rc); rc += 4;
+            rc += 8; // timestamp
+            if (nameId >= stringCount) continue;
+            var recordPath = strings[nameId].Replace('\\', '/').TrimStart('/');
+            if (Classify(recordPath) != "Riftgate") continue;
+            if (uncompressedSize > 4 * 1024 * 1024 || compressedSize > stream.Length) continue;
+            var fileOffset = 24L + dataOffset;
+            if (fileOffset < 24 || fileOffset > stream.Length - compressedSize) continue;
+            var compressed = ReadBytes(stream, fileOffset, (int)compressedSize);
+            var raw = compressedSize == uncompressedSize
+                ? compressed
+                : ArcReader.DecompressBlock(compressed, (int)uncompressedSize);
+            string? description = null, actorName = null, teleportTag = null, zoneTag = null;
+            var fc = 0;
+            while (fc <= raw.Length - 8)
+            {
+                var dataType = ReadU16(raw, fc);
+                var valueCount = ReadU16(raw, fc + 2);
+                var keyId = ReadU32(raw, fc + 4);
+                fc += 8;
+                var valueBytes = (long)valueCount * 4;
+                if (valueBytes > raw.Length - fc) break;
+                if (dataType == 2 && valueCount >= 1 && keyId < stringCount)
+                {
+                    var valId = ReadU32(raw, fc);
+                    if (valId < stringCount)
+                    {
+                        var key = strings[keyId];
+                        var value = strings[valId];
+                        if (key.Equals("description", StringComparison.OrdinalIgnoreCase)) description = value;
+                        else if (key.Equals("ActorName", StringComparison.OrdinalIgnoreCase)) actorName = value;
+                        else if (key.Equals("TeleportNameTag", StringComparison.OrdinalIgnoreCase)) teleportTag = value;
+                        else if (key.Equals("ZoneNameTag", StringComparison.OrdinalIgnoreCase)) zoneTag = value;
+                    }
+                }
+                fc += (int)valueBytes;
+            }
+            foreach (var tag in new[] { description, actorName, teleportTag, zoneTag })
+            {
+                if (string.IsNullOrWhiteSpace(tag) || !tags.TryGetValue(tag, out var localized)) continue;
+                var cleaned = Regex.Replace(localized, @"\{\^[^}]*\}", "").Trim();
+                if (cleaned.Length > 0)
+                {
+                    output[recordPath] = cleaned;
+                    break;
+                }
+            }
+        }
+    }
+
+    private static ushort ReadU16(ReadOnlySpan<byte> data, int offset)
+    {
+        if (offset < 0 || offset + 2 > data.Length) throw new InvalidDataException("Compiled game data is truncated.");
+        return BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(offset, 2));
     }
 
     private static uint ReadU32(ReadOnlySpan<byte> data, int offset)

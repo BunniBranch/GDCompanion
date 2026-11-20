@@ -13,6 +13,7 @@ public static class NavigationOverlayProjection
     private const int MaximumPoiTargets = 48;
     private const int MinimumPoiTargets = 8;
     private const int MaximumNearbyTravelTargets = 8;
+    private const int MaximumRiftgates = 2;
     private const double PoiEdgeRatio = 0.91;
     private const double QuestEdgeRatio = 1.05;
     private const double InverseSqrtTwo = 0.7071067811865476;
@@ -69,11 +70,22 @@ public static class NavigationOverlayProjection
             // Game-owned live markers are the only reliable nearby POIs: the
             // installed catalog spans separate world maps whose coordinates
             // can overlap. Catalog entries remain useful as distant bearings.
-            var live = poiPoints.Where(point => point.Marker.Category != "Quest Objective" && IsLive(point.Marker) &&
-                                             point.Distance <= displayRange)
+            var nearbyNonRiftLive = poiPoints.Where(point => point.Marker.Category != "Quest Objective" &&
+                                                             IsLive(point.Marker) && !IsRiftgate(point.Marker) &&
+                                                             point.Distance <= displayRange)
                 .OrderBy(point => point.Distance)
                 .Take(MaximumPoiTargets)
                 .ToArray();
+            var liveRiftgates = poiPoints.Where(point => IsLive(point.Marker) && IsRiftgate(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var allCatalogRiftgates = poiPoints.Where(point => point.Marker.Category == "Riftgate" && !IsLive(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var catalogRiftgates = allCatalogRiftgates.Where(point => point.Distance > displayRange).ToArray();
+            var selectedRiftgates = SelectClosestRiftgates(liveRiftgates, catalogRiftgates, allCatalogRiftgates);
+            var nearbyRiftgates = selectedRiftgates.Where(point => point.Distance <= displayRange).ToArray();
+            var distantRiftgates = selectedRiftgates.Where(point => point.Distance > displayRange).ToArray();
             // Static boats and ferries are absent from some game minimap
             // passes. Their catalog placements are safe and useful nearby,
             // while other catalog POIs stay direction-only to avoid markers
@@ -83,13 +95,18 @@ public static class NavigationOverlayProjection
                 .OrderBy(point => point.Distance)
                 .Take(MaximumNearbyTravelTargets)
                 .ToArray();
-            var nearby = live.Concat(nearbyTravel).DistinctBy(point => point.Marker.Id).ToArray();
+            var nearby = nearbyNonRiftLive.Concat(nearbyTravel).Concat(nearbyRiftgates)
+                .DistinctBy(point => point.Marker.Id)
+                .Take(Math.Max(0, MaximumPoiTargets - distantRiftgates.Length))
+                .ToArray();
             var fallbackCount = Math.Max(0, MinimumPoiTargets - nearby.Length);
-            var distant = poiPoints.Where(point => point.Marker.Category != "Quest Objective" && !IsLive(point.Marker) &&
+            var distant = poiPoints.Where(point => point.Marker.Category != "Quest Objective" &&
+                                                point.Marker.Category != "Riftgate" &&
+                                                !IsLive(point.Marker) &&
                                                 point.Distance > displayRange)
                 .OrderBy(point => point.Distance)
                 .Take(fallbackCount);
-            pois = nearby.Concat(distant).Take(MaximumPoiTargets).ToArray();
+            pois = nearby.Concat(distantRiftgates).Concat(distant).DistinctBy(point => point.Marker.Id).Take(MaximumPoiTargets).ToArray();
         }
 
         return quests.Concat(pois).Select(point => Project(player, point, displayRange, projection)).ToArray();
@@ -283,6 +300,48 @@ public static class NavigationOverlayProjection
 
     private static bool IsLive(WorldMarkerRecord marker) =>
         marker.QuestPaths?.Contains("$live", StringComparer.Ordinal) == true;
+
+    private static bool IsRiftgate(WorldMarkerRecord marker) =>
+        marker.Category == "Riftgate" ||
+        (IsLive(marker) && marker.Category == "Travel Utility" &&
+         !string.Equals(marker.RecordPath, "live://minimap/20", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsGenericRiftgateLabel(string? value) =>
+        string.IsNullOrWhiteSpace(value) ||
+        value.Equals("Riftgate", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("Travel Utility", StringComparison.OrdinalIgnoreCase);
+
+    private static Candidate[] SelectClosestRiftgates(
+        IReadOnlyCollection<Candidate> liveRiftgates,
+        IReadOnlyCollection<Candidate> catalogRiftgates,
+        IReadOnlyCollection<Candidate> allCatalogRiftgates)
+    {
+        var enrichedLive = liveRiftgates.Select(live =>
+        {
+            if (!IsGenericRiftgateLabel(live.Marker.DisplayName)) return live;
+            var match = allCatalogRiftgates
+                .Where(catalog => !IsGenericRiftgateLabel(catalog.Marker.DisplayName) &&
+                                  MarkerDistance(live.Marker, catalog.Marker) <= 16)
+                .OrderBy(catalog => MarkerDistance(live.Marker, catalog.Marker))
+                .FirstOrDefault();
+            return match is null
+                ? live
+                : live with { Marker = live.Marker with { DisplayName = match.Marker.DisplayName } };
+        }).ToArray();
+        var filteredCatalog = catalogRiftgates.Where(point =>
+            !enrichedLive.Any(livePoint => MarkerDistance(livePoint.Marker, point.Marker) <= 16));
+        var selected = new List<Candidate>(MaximumRiftgates);
+        foreach (var candidate in enrichedLive.Concat(filteredCatalog)
+                     .OrderBy(point => point.Distance)
+                     .ThenBy(point => IsLive(point.Marker) ? 0 : 1))
+        {
+            if (selected.Any(existing => MarkerDistance(existing.Marker, candidate.Marker) <= 16))
+                continue;
+            selected.Add(candidate);
+            if (selected.Count == MaximumRiftgates) break;
+        }
+        return selected.ToArray();
+    }
 
     private static bool QuestMatches(IReadOnlySet<string> active, string candidate)
     {

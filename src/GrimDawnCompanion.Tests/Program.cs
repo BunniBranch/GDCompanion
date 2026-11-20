@@ -317,6 +317,14 @@ var helpingOutFromLowerCrossing = NavigationOverlayProjection.Build(new WorldPos
 Require(helpingOutFromLowerCrossing.Any(x => x.Marker.RecordPath.EndsWith("npc_kasparov_01.dbr", StringComparison.OrdinalIgnoreCase)) &&
         helpingOutFromLowerCrossing.Any(x => x.Marker.RecordPath.EndsWith("npc_barnabas_01.dbr", StringComparison.OrdinalIgnoreCase)),
     "installed Helping Out targets project from the live Lower Crossing position before their region is loaded");
+Require(worldMarkers.Markers.Any(m => m.Category == "Riftgate"),
+    "installed world marker catalog indexes Riftgate locations");
+var catalogRifts = worldMarkers.Markers.Where(m => m.Category == "Riftgate").ToArray();
+Require(catalogRifts.All(m => !string.IsNullOrWhiteSpace(m.DisplayName) &&
+                              !m.DisplayName.Equals("Riftgate", StringComparison.OrdinalIgnoreCase) &&
+                              !m.DisplayName.StartsWith("tag", StringComparison.OrdinalIgnoreCase)) &&
+        catalogRifts.Any(m => m.DisplayName == "Devil's Crossing Rift"),
+    "installed catalog Riftgates resolve localized display names instead of generic labels");
 QuestMarkerHandoffRegressionTests.Run(worldMarkers.Markers);
 
 var projectionPlayer = new WorldPosition(100, 0, 100);
@@ -346,6 +354,62 @@ Require(projected.All(x => x.Marker.Id != "ghost"),
     "navigation projection excludes nearby catalog POIs that may belong to another map");
 Require(projected.Any(x => x.Marker.Id == "nearby-boat"),
     "navigation projection includes nearby catalog travel utilities missing from the live minimap");
+var crowdedRiftMarkers = Enumerable.Range(0, 10)
+    .Select(i => new WorldMarkerRecord($"near-npc-{i}", "Vendor", $"live://npc/{i}", "live://current-map", 105 + i, 0, 100, ["$live"]))
+    .Concat([
+        new WorldMarkerRecord("far-catalog-rift", "Riftgate", "records/interactive/riftgate_01.dbr", "Levels/Region0A001.lvl", 350, 0, 100),
+        new WorldMarkerRecord("far-catalog-rift-2", "Riftgate", "records/interactive/riftgate_02.dbr", "Levels/Region0A001.lvl", 450, 0, 100),
+        new WorldMarkerRecord("far-live-rift", "Travel Utility", "live://minimap/3", "live://current-map", 100, 0, 320, ["$live"], "Riftgate")
+    ])
+    .ToArray();
+var projectedRifts = NavigationOverlayProjection.Build(projectionPlayer, crowdedRiftMarkers, [], false, true, 40, "Levels/Region0A001.lvl");
+Require(projectedRifts.Any(x => x.Marker.Id == "far-catalog-rift" && x.IsDistant) &&
+        projectedRifts.Any(x => x.Marker.Id == "far-live-rift" && x.IsDistant) &&
+        projectedRifts.All(x => x.Marker.Id != "far-catalog-rift-2"),
+    "navigation projection keeps only the two closest distant riftgates at the radar rim even when nearby POIs exceed MinimumPoiTargets");
+var filteredRifts = NavigationOverlayProjection.Build(projectionPlayer, crowdedRiftMarkers, [], false, true, 40, "Levels/Region0A001.lvl",
+    poiFilter: PoiFilter.All & ~PoiFilter.Travel);
+Require(filteredRifts.All(x => x.Marker.Id is not "far-catalog-rift" and not "far-live-rift"),
+    "navigation projection respects Travel POI filter for distant riftgates");
+var wildernessRiftMarkers = Enumerable.Range(1, 5)
+    .Select(i => new WorldMarkerRecord($"wild-rift-{i}", "Riftgate", $"records/ui/riftgatemap/locations/riftgate_{i}.dbr",
+        "Levels/Region0A001.lvl", 100 + i * 100, 0, 100))
+    .ToArray();
+var wildernessRifts = NavigationOverlayProjection.Build(projectionPlayer, wildernessRiftMarkers, [], false, true, 40, "Levels/Region0A001.lvl");
+Require(wildernessRifts.Count == 2 && wildernessRifts[0].Marker.Id == "wild-rift-1" && wildernessRifts[1].Marker.Id == "wild-rift-2",
+    "navigation projection caps wilderness distant riftgates at two without leaking extras into fallback slots");
+var nearbyAndDistantRiftMarkers = new[]
+{
+    new WorldMarkerRecord("near-live-rift", "Travel Utility", "live://minimap/3", "live://current-map", 115, 0, 100, ["$live"], "Riftgate"),
+    new WorldMarkerRecord("far-rift-1", "Riftgate", "records/ui/riftgatemap/locations/riftgate_1.dbr", "Levels/Region0A001.lvl", 300, 0, 100),
+    new WorldMarkerRecord("far-rift-2", "Riftgate", "records/ui/riftgatemap/locations/riftgate_2.dbr", "Levels/Region0A001.lvl", 400, 0, 100),
+    new WorldMarkerRecord("far-rift-3", "Riftgate", "records/ui/riftgatemap/locations/riftgate_3.dbr", "Levels/Region0A001.lvl", 500, 0, 100)
+};
+var nearbyAndDistantRifts = NavigationOverlayProjection.Build(projectionPlayer, nearbyAndDistantRiftMarkers, [], false, true, 40, "Levels/Region0A001.lvl");
+Require(nearbyAndDistantRifts.Count == 2 &&
+        nearbyAndDistantRifts.Any(x => x.Marker.Id == "near-live-rift" && !x.IsDistant) &&
+        nearbyAndDistantRifts.Any(x => x.Marker.Id == "far-rift-1" && x.IsDistant),
+    "navigation projection counts nearby live riftgates toward the two-riftgate cap");
+var colocatedRiftMarkers = new[]
+{
+    new WorldMarkerRecord("dup-rift-a", "Riftgate", "records/ui/riftgatemap/locations/riftgate_a.dbr", "Levels/Region0A001.lvl", 300, 0, 100),
+    new WorldMarkerRecord("dup-rift-b", "Riftgate", "records/ui/riftgatemap/locations/riftgate_b.dbr", "Levels/Region0A001.lvl", 303, 0, 100),
+    new WorldMarkerRecord("next-rift", "Riftgate", "records/ui/riftgatemap/locations/riftgate_c.dbr", "Levels/Region0A001.lvl", 450, 0, 100)
+};
+var colocatedRifts = NavigationOverlayProjection.Build(projectionPlayer, colocatedRiftMarkers, [], false, true, 40, "Levels/Region0A001.lvl");
+Require(colocatedRifts.Count == 2 &&
+        colocatedRifts.Any(x => x.Marker.Id == "dup-rift-a") &&
+        colocatedRifts.Any(x => x.Marker.Id == "next-rift"),
+    "navigation projection deduplicates co-located catalog riftgates before applying the two-riftgate cap");
+var genericLiveRiftMarkers = new[]
+{
+    new WorldMarkerRecord("live-rift-near", "Travel Utility", "live://minimap/3", "live://current-map", 115, 0, 100, ["$live"], "Travel Utility"),
+    new WorldMarkerRecord("catalog-rift-near", "Riftgate", "records/ui/riftgatemap/locations/riftgatea_devilscrossing.dbr", "Levels/Region0A001.lvl", 116, 0, 100, DisplayName: "Devil's Crossing Rift")
+};
+var enrichedLiveRifts = NavigationOverlayProjection.Build(projectionPlayer, genericLiveRiftMarkers, [], false, true, 40, "Levels/Region0A001.lvl");
+Require(enrichedLiveRifts.Count == 1 && enrichedLiveRifts[0].Marker.Id == "live-rift-near" &&
+        enrichedLiveRifts[0].Marker.DisplayName == "Devil's Crossing Rift",
+    "navigation projection enriches generic nearby live riftgate labels from co-located catalog riftgates");
 var projectedQuests = NavigationOverlayProjection.Build(projectionPlayer, projectionMarkers, ["quests/test.qst"], true, false, 40);
 Require(projectedQuests.Any(x => x.Marker.Id == "far-quest" && x.IsDistant),
     "navigation projection draws distant live quest objectives at the radar rim");
