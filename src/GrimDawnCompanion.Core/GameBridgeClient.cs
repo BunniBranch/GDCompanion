@@ -29,6 +29,7 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
     public bool SupportsLiveQuestTasks => ProtocolVersion >= 33 && SupportsQuestTasks && Capabilities.Contains("QUEST_TASKS_LIVE");
     public bool SupportsCharacterLevel => ProtocolVersion >= 36 && Capabilities.Contains("CHARACTER_LEVEL") && SupportsResourceSet;
     public bool SupportsNativeRadar => ProtocolVersion >= 31 && SupportsMinimapProjection && Capabilities.Contains("RADAR_CANVAS");
+    public bool SupportsRestoredShrines => ProtocolVersion >= 39 && Capabilities.Contains("RESTORED_SHRINES");
 
     public async Task<string> ConnectAsync(GameInstallation game, string bridgeDllPath, CancellationToken cancellationToken = default)
     {
@@ -281,7 +282,7 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         EnsureCapability("RADAR_CANVAS");
-        foreach (var command in NativeRadarFrame.Commands(context, points))
+        foreach (var command in NativeRadarFrame.Commands(context, points, Capabilities.Contains("RADAR_CANVAS_TRAVEL")))
         {
             var response = await SendAsync(command, cancellationToken);
             if (response != "OK RADAR_CANVAS") throw new InvalidOperationException(response);
@@ -297,6 +298,44 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
 
     public async Task<NativeRadarStatus> GetNativeRadarStatusAsync(CancellationToken cancellationToken = default) =>
         NativeRadarStatus.Parse(await SendAsync("RADAR\tCANVAS\tSTATUS", cancellationToken));
+
+    public async Task<IReadOnlySet<string>?> GetRestoredShrineUidsAsync(CancellationToken cancellationToken = default) =>
+        (await GetRestoredShrineStateAsync(cancellationToken))?.Uids;
+
+    public async Task<RestoredShrineState?> GetRestoredShrineStateAsync(CancellationToken cancellationToken = default)
+    {
+        if (!SupportsRestoredShrines)
+            return new RestoredShrineState(new HashSet<string>(StringComparer.OrdinalIgnoreCase), null);
+        return ParseRestoredShrineState(await SendAsync("SHRINE\tRESTORED", cancellationToken));
+    }
+
+    public static IReadOnlySet<string>? ParseRestoredShrineUids(string response) =>
+        ParseRestoredShrineState(response)?.Uids;
+
+    public static RestoredShrineState? ParseRestoredShrineState(string response)
+    {
+        if (response == "OK RESTORED_SHRINES WAITING") return null;
+        var parts = response.Split('\t', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0 || !parts[0].StartsWith("OK RESTORED_SHRINES ", StringComparison.Ordinal))
+            throw new InvalidOperationException(response);
+        int? difficulty = null;
+        foreach (var token in parts[0].Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (token.StartsWith("DIFF=", StringComparison.Ordinal) &&
+                int.TryParse(token.AsSpan(5), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) &&
+                parsed is >= 0 and <= 2)
+            {
+                difficulty = parsed;
+            }
+        }
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var uid in parts.Skip(1))
+        {
+            if (uid.Length == 32 && uid.All(Uri.IsHexDigit))
+                result.Add(uid.ToUpperInvariant());
+        }
+        return new RestoredShrineState(result, difficulty);
+    }
 
     public async Task<IReadOnlyList<LiveMapMarkerRecord>> GetLiveMapMarkersAsync(CancellationToken cancellationToken = default)
     {

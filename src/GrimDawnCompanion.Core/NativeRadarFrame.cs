@@ -9,7 +9,7 @@ public static class NativeRadarFrame
     private const int MaxTooltipChars = 48;
     private const int MaxLabelUtf8Bytes = 192;
 
-    public static IReadOnlyList<string> Commands(ulong context, IEnumerable<NavigationOverlayPoint> points)
+    public static IReadOnlyList<string> Commands(ulong context, IEnumerable<NavigationOverlayPoint> points, bool supportsTravelKind = true)
     {
         if (context == 0) throw new ArgumentOutOfRangeException(nameof(context));
         var markers = points.ToArray();
@@ -26,8 +26,16 @@ public static class NativeRadarFrame
             var encoded = Convert.ToHexString(Encoding.UTF8.GetBytes(FormatLabel(point)));
             var kind = marker.Category switch
             {
-                "Quest Objective" => 0, "Devotion Shrine" => 2, "Riftgate" or "Travel Utility" => 3,
-                "One-Shot Chest" => 4, "Vendor" or "Blacksmith" => 5, "Lore Note" => 6, _ => 1
+                "Quest Objective" => 0,
+                "Devotion Shrine" => 2,
+                "Riftgate" => 3,
+                "One-Shot Chest" => 4,
+                "Vendor" or "Blacksmith" => 5,
+                "Lore Note" => 6,
+                "Travel Utility" when !string.Equals(marker.RecordPath, "live://minimap/3", StringComparison.OrdinalIgnoreCase) =>
+                    supportsTravelKind ? 7 : 3,
+                "Travel Utility" => 3,
+                _ => 1
             };
             var entry = string.Create(CultureInfo.InvariantCulture, $"\t{marker.WorldX:R},{marker.WorldZ:R},{kind},{encoded}");
             if (batch.Length + entry.Length > 3500) { commands.Add(batch); batch = prefix; }

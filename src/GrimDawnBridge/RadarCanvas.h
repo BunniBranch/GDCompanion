@@ -63,7 +63,8 @@ namespace RadarCanvas
         const float scale = std::clamp(bounds[2] / 230.f, .75f, 2.25f);
         constexpr float outline[]{ .03f, .067f, .114f, 1.f };
         constexpr float colors[][4]{ {1.f,.82f,.35f,1.f}, {.20f,.88f,.79f,1.f}, {.67f,.50f,1.f,1.f},
-            {.30f,.67f,1.f,1.f}, {1.f,.60f,.32f,1.f}, {.95f,.77f,.40f,1.f}, {.8f,.86f,.94f,1.f} };
+            {.30f,.67f,1.f,1.f}, {1.f,.60f,.32f,1.f}, {.95f,.77f,.40f,1.f}, {.8f,.86f,.94f,1.f}, {.35f,.92f,.42f,1.f} };
+        static_assert(std::size(colors) == MaxMarkerKind + 1);
         POINT cursor{}; RECT client{};
         const bool haveCursor = GetCursorPos(&cursor) && ScreenToClient(window, &cursor) &&
             GetClientRect(window, &client) && client.right > 0 && client.bottom > 0;

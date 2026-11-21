@@ -37,6 +37,9 @@ public partial class MainWindow : Window
     private bool _nativeRadarSubmitted;
     private IReadOnlyList<LiveMapMarkerRecord> _liveMapMarkers = [];
     private IReadOnlyList<LiveMapMarkerRecord> _regionalQuestMarkers = [];
+    private IReadOnlySet<string> _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _openedChestTokens = new(StringComparer.OrdinalIgnoreCase);
+    private int? _gameDifficulty;
     private string? _currentLevelPath;
     private MinimapGeometry? _minimapGeometry;
     private readonly RegionalQuestMarkerCache _questMarkerCache = new();
@@ -448,6 +451,7 @@ public partial class MainWindow : Window
         {
             var state = await _bridge.SetTokenAsync(_viewModel.SelectedToken.Name, present, _lifetime.Token);
             _viewModel.TokenState = state ? "Present" : "Absent";
+            _openedChestTokens.Clear();
             SetStatus("Token repaired", $"{_viewModel.SelectedToken.Name} is now {_viewModel.TokenState.ToLowerInvariant()}.", 100);
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Quest token change not completed", MessageBoxButton.OK, MessageBoxImage.Warning); }
@@ -665,6 +669,9 @@ public partial class MainWindow : Window
         _activeQuestPaths = [];
         _liveMapMarkers = [];
         _regionalQuestMarkers = [];
+        _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _openedChestTokens.Clear();
+        _gameDifficulty = null;
         _currentLevelPath = null;
         _questMarkerCache.Clear();
         _navigationTimer ??= new DispatcherTimer(DispatcherPriority.Render)
@@ -720,6 +727,38 @@ public partial class MainWindow : Window
                             ? "Quest data unavailable — long-range objectives cannot be resolved yet."
                             : $"Quest data: {_activeQuestPaths.Count} active tracked quests • {catalogObjectives.Count} catalog targets in this map region.";
                 _liveMapMarkers = await _bridge.GetLiveMapMarkersAsync(_lifetime.Token);
+                if (_bridge.SupportsRestoredShrines)
+                {
+                    var restoredShrines = await _bridge.GetRestoredShrineStateAsync(_lifetime.Token);
+                    if (restoredShrines is not null)
+                    {
+                        if (restoredShrines.Difficulty != _gameDifficulty)
+                            _openedChestTokens.Clear();
+                        _restoredShrineUids = restoredShrines.Uids;
+                        _gameDifficulty = restoredShrines.Difficulty;
+                    }
+                }
+                if (NavigationPoiBox.IsChecked == true &&
+                    PoiFilters.Allows(_settings.EnabledPoiTypes, "One-Shot Chest") &&
+                    _bridge.Capabilities.Contains("TOKENS"))
+                {
+                    try
+                    {
+                        foreach (var tokenGroup in NavigationOverlayProjection.CandidateOneShotChestTokens(
+                                     player, _navigationCatalog.Markers, _currentLevelPath, _openedChestTokens))
+                        {
+                            foreach (var token in tokenGroup)
+                            {
+                                if (await _bridge.HasTokenAsync(token, _lifetime.Token))
+                                {
+                                    _openedChestTokens.Add(token);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception) when (!_lifetime.IsCancellationRequested) { }
+                }
                 var region = NavigationOverlayProjection.ResolveRegionFamily(_currentLevelPath) ??
                              NavigationOverlayProjection.ResolveCurrentRegionFamily(
                                  player, _navigationCatalog.Markers, NavigationCatalogRange);
@@ -735,6 +774,7 @@ public partial class MainWindow : Window
             {
                 if (_nativeRadarSubmitted) await _bridge.ClearNativeRadarAsync(_lifetime.Token);
                 _nativeRadarSubmitted = false;
+                _openedChestTokens.Clear();
                 NavigationAlignmentStatusText.Text = "Waiting for a supported visible minimap; in-game radar hidden.";
                 _viewModel.NavigationStatusText = "Radar enabled — waiting for the game's minimap.";
                 return;
@@ -744,6 +784,9 @@ public partial class MainWindow : Window
                 await _bridge.ClearNativeRadarAsync(_lifetime.Token);
                 _nativeRadarContext = _minimapGeometry.RenderContext;
                 _nativeRadarSubmitted = false;
+                _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _openedChestTokens.Clear();
+        _gameDifficulty = null;
                 _navigationPollCount = 0; // Refresh map/quest selection before using the new render context.
                 return;
             }
@@ -752,7 +795,8 @@ public partial class MainWindow : Window
             {
                 var selected = NavigationOverlayProjection.Build(player, _navigationCatalog.Markers.Concat(liveMarkers), _activeQuestPaths,
                     NavigationQuestBox.IsChecked == true, NavigationPoiBox.IsChecked == true, NavigationCatalogRange,
-                    _currentLevelPath, _minimapGeometry.Projection, _questNavigationState, _settings.EnabledPoiTypes);
+                    _currentLevelPath, _minimapGeometry.Projection, _questNavigationState, _settings.EnabledPoiTypes,
+                    _restoredShrineUids, _gameDifficulty, _openedChestTokens);
                 await _bridge.SetNativeRadarFrameAsync(_nativeRadarContext, selected, _lifetime.Token);
                 _nativeRadarSubmitted = true;
             }
@@ -792,6 +836,9 @@ public partial class MainWindow : Window
         _activeQuestPaths = [];
         _liveMapMarkers = [];
         _regionalQuestMarkers = [];
+        _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _openedChestTokens.Clear();
+        _gameDifficulty = null;
         _currentLevelPath = null;
         _minimapGeometry = null;
         _questMarkerCache.Clear();
@@ -826,7 +873,7 @@ public partial class MainWindow : Window
     {
         var category = marker.Type switch
         {
-            3 => "Travel Utility",
+            3 => "Riftgate",
             21 => "Quest Objective",
             2 => "NPC or Site",
             7 => "Vendor",
@@ -936,6 +983,7 @@ internal sealed class AppSettings
     public bool ShowActiveQuestMarkers { get; set; } = true;
     public bool ShowPointOfInterestMarkers { get; set; } = true;
     public PoiFilter EnabledPoiTypes { get; set; } = PoiFilter.All;
+    public int PoiFilterVersion { get; set; }
 
     public static async Task<AppSettings> LoadAsync()
     {
@@ -943,15 +991,23 @@ internal sealed class AppSettings
         {
             if (File.Exists(PathName))
             {
-                return JsonSerializer.Deserialize<AppSettings>(await File.ReadAllTextAsync(PathName)) ?? new();
+                var settings = JsonSerializer.Deserialize<AppSettings>(await File.ReadAllTextAsync(PathName))
+                    ?? new AppSettings { PoiFilterVersion = PoiFilters.CurrentFilterVersion };
+                if (settings.PoiFilterVersion < PoiFilters.CurrentFilterVersion)
+                {
+                    settings.EnabledPoiTypes = PoiFilters.MigrateFilter(settings.EnabledPoiTypes, settings.PoiFilterVersion);
+                    settings.PoiFilterVersion = PoiFilters.CurrentFilterVersion;
+                }
+                return settings;
             }
         }
         catch { }
-        return new AppSettings();
+        return new AppSettings { PoiFilterVersion = PoiFilters.CurrentFilterVersion };
     }
 
     public async Task SaveAsync()
     {
+        PoiFilterVersion = PoiFilters.CurrentFilterVersion;
         Directory.CreateDirectory(Path.GetDirectoryName(PathName)!);
         await File.WriteAllTextAsync(PathName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }

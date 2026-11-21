@@ -9,6 +9,7 @@
 namespace RadarCanvas
 {
     constexpr size_t MaxMarkers = 112;
+    constexpr unsigned MaxMarkerKind = 7;
     constexpr float PoiEdgeRatio = .91f;
     constexpr float QuestEdgeRatio = 1.05f;
     struct Marker { float x = 0, z = 0; unsigned kind = 0; std::string label; };
@@ -35,7 +36,7 @@ namespace RadarCanvas
         const auto fields = Split(input, ',');
         if (fields.size() != 4 || !Number(fields[0], marker.x) || !Number(fields[1], marker.z) ||
             !Number(fields[2], marker.kind) || !std::isfinite(marker.x) || !std::isfinite(marker.z) ||
-            fabsf(marker.x) > 1000000 || fabsf(marker.z) > 1000000 || marker.kind > 6 ||
+            fabsf(marker.x) > 1000000 || fabsf(marker.z) > 1000000 || marker.kind > MaxMarkerKind ||
             fields[3].empty() || fields[3].size() > 384 || fields[3].size() % 2 != 0) return false;
         marker.label.clear();
         for (size_t i = 0; i < fields[3].size(); i += 2)

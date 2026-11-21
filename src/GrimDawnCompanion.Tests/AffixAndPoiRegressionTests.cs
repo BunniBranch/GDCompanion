@@ -68,6 +68,136 @@ internal static class AffixAndPoiRegressionTests
         require(NavigationOverlayProjection.Build(new(0,0,0),points.Append(quest),[],true,true,50,poiFilter:PoiFilter.None).Single().Marker==quest,"all POI types off retains quest markers");
         require(NavigationOverlayProjection.Build(new(0,0,0),points,[],false,false,50,poiFilter:PoiFilter.All).Count==0,"master POI toggle overrides category selection");
         require(JsonSerializer.Deserialize<PoiFilter>(JsonSerializer.Serialize(PoiFilter.Travel|PoiFilter.Lore))==(PoiFilter.Travel|PoiFilter.Lore),"POI flags round-trip independently");
+
+        var domainPlayer=new WorldPosition(100,0,100);
+        var domainFallbackPois=new[]{
+            new WorldMarkerRecord("ug-chest","One-Shot Chest","records/items/lootchests/oneshotchests/ug.dbr","Levels/Undergrounds/RegionUG_CaveBurial_A02.lvl",170,0,100),
+            new WorldMarkerRecord("void-vendor","Vendor","records/creatures/npcs/merchants/void.dbr","Levels/Void/RegionVoid_BastionOfChaosA02.lvl",180,0,100),
+            new WorldMarkerRecord("other-ug-lore","Lore Note","records/items/loreobjects/other.dbr","Levels/Undergrounds/RegionUG_DCPrisonCellar_A03.lvl",190,0,100),
+            new WorldMarkerRecord("ow-lore","Lore Note","records/items/loreobjects/ow.dbr","Levels/Region0B032.lvl",300,0,100),
+            new WorldMarkerRecord("ow-blacksmith","Blacksmith","records/creatures/npcs/blacksmith_ow.dbr","Levels/Region0A010.lvl",320,0,100),
+            new WorldMarkerRecord("ow-spirit","Spirit Guide","records/creatures/npcs/spiritguide_ow.dbr","Levels/Region0A010.lvl",340,0,100),
+            new WorldMarkerRecord("ow-altar","Ascension Altar","records/interactive/ascension_altar.dbr","Levels/Region0A010.lvl",360,0,100)
+        };
+        var liveUgPoi=new WorldMarkerRecord("live-ug-vendor","Vendor","live://minimap/vendor","live://current-map",115,0,100,["$live"],"Merchant");
+        var owFallback=NavigationOverlayProjection.Build(domainPlayer,domainFallbackPois,[],false,true,40,"Levels/Region0A001.lvl");
+        require(owFallback.Select(p=>p.Marker.Id).SequenceEqual(["ow-lore","ow-blacksmith","ow-spirit","ow-altar"]),
+            "overworld POI fallback selects only overworld catalog POIs when underground and void POIs are closer");
+        require(NavigationOverlayProjection.Build(domainPlayer,domainFallbackPois,[],false,true,40,"Levels/Undergrounds/RegionUG_CaveBurial_A01.lvl")
+                .Single().Marker.Id=="ug-chest",
+            "underground POI fallback selects only catalog POIs in the same dungeon family");
+        require(NavigationOverlayProjection.Build(domainPlayer,domainFallbackPois,[],false,true,40,"Levels/Undergrounds/RegionUG_SmugglersBasin_A01.lvl")
+                .Count==0 &&
+                NavigationOverlayProjection.Build(domainPlayer,domainFallbackPois.Append(liveUgPoi),[],false,true,40,"Levels/Undergrounds/RegionUG_SmugglersBasin_A01.lvl")
+                .Single().Marker.Id=="live-ug-vendor",
+            "dungeons without matching catalog POIs hide unrelated catalog POIs while preserving live POIs");
+        require(NavigationOverlayProjection.Build(domainPlayer,domainFallbackPois,[],false,true,40,currentLevelPath:null).Count==domainFallbackPois.Length,
+            "unknown current level path retains all catalog POIs for backward compatibility");
+
+        var domainRiftgates=new[]{
+            new WorldMarkerRecord("ug-lab-rift","Riftgate","records/ui/riftgatemap/locations/riftgatea_wardenslabratory.dbr","Levels/Undergrounds/RegionUG_Labratory_A03.lvl",170,0,100,DisplayName:"Warden's Laboratory Rift"),
+            new WorldMarkerRecord("rl-rift","Riftgate","records/ui/riftgatemap/locations/riftgate_rl.dbr","Levels/Roguelike/RL_Dranghoul_A01.lvl",180,0,100,DisplayName:"Dranghoul Rift"),
+            new WorldMarkerRecord("ow-rift-1","Riftgate","records/ui/riftgatemap/locations/riftgate_ow1.dbr","Levels/Region0A001.lvl",300,0,100,DisplayName:"Devil's Crossing Rift"),
+            new WorldMarkerRecord("ow-rift-2","Riftgate","records/ui/riftgatemap/locations/riftgate_ow2.dbr","Levels/Region0A020.lvl",400,0,100,DisplayName:"Burrwitch Rift")
+        };
+        var genericUgLiveRift=new WorldMarkerRecord("live-ug-rift","Travel Utility","live://minimap/3","live://current-map",302,0,100,["$live"],"Travel Utility");
+        var owRifts=NavigationOverlayProjection.Build(domainPlayer,domainRiftgates,[],false,true,40,"Levels/Region0A005.lvl");
+        require(owRifts.Select(p=>p.Marker.Id).SequenceEqual(["ow-rift-1","ow-rift-2"]),
+            "overworld riftgate selection excludes closer underground and roguelike riftgates");
+        require(NavigationOverlayProjection.Build(domainPlayer,domainRiftgates,[],false,true,40,"Levels/Undergrounds/RegionUG_Labratory_A01.lvl")
+                .Single().Marker.Id=="ug-lab-rift",
+            "underground riftgate selection includes only the same dungeon family's catalog riftgate");
+        var basinRifts=NavigationOverlayProjection.Build(domainPlayer,domainRiftgates.Append(genericUgLiveRift),[],false,true,40,"Levels/Undergrounds/RegionUG_SmugglersBasin_A01.lvl");
+        require(basinRifts.Count==1 && basinRifts[0].Marker.Id=="live-ug-rift" && basinRifts[0].Marker.DisplayName=="Travel Utility",
+            "underground live riftgate does not inherit a co-located overworld catalog riftgate label");
+
+        var domainTravel=new[]{
+            new WorldMarkerRecord("ow-boat","Travel Utility","records/interactive/boat_ow.dbr","Levels/Region0A010.lvl",112,0,100,DisplayName:"Row Boat"),
+            new WorldMarkerRecord("ug-boat","Travel Utility","records/interactive/boat_ug.dbr","Levels/Undergrounds/RegionUG_Cellar_Wightmire_A01.lvl",114,0,100,DisplayName:"Row Boat")
+        };
+        require(NavigationOverlayProjection.Build(domainPlayer,domainTravel,[],false,true,40,"Levels/Region0A001.lvl")
+                .Single().Marker.Id=="ow-boat",
+            "overworld travel utilities exclude nearby underground catalog boats");
+        require(NavigationOverlayProjection.Build(domainPlayer,domainTravel,[],false,true,40,"Levels/Undergrounds/RegionUG_CaveBurial_A01.lvl")
+                .Count==0 &&
+                NavigationOverlayProjection.Build(domainPlayer,domainTravel,[],false,true,40,"Levels/Undergrounds/RegionUG_Cellar_Wightmire_A02.lvl")
+                .Single().Marker.Id=="ug-boat",
+            "underground travel utilities appear only in their matching dungeon family");
+
+        var localPoiRangeTest=new[]{
+            new WorldMarkerRecord("boat-1000m","Travel Utility","records/interactive/boat_1000.dbr","Levels/Region0A010.lvl",1100,0,100,DisplayName:"Row Boat"),
+            new WorldMarkerRecord("boat-1001m","Travel Utility","records/interactive/boat_1001.dbr","Levels/Region0A010.lvl",1101,0,100,DisplayName:"Row Boat"),
+            new WorldMarkerRecord("ferry-900m","Travel Utility","records/interactive/ferry_900.dbr","Levels/Region0A010.lvl",1000,0,100,DisplayName:"Ferry"),
+            new WorldMarkerRecord("ferry-1001m","Travel Utility","records/interactive/ferry_1001.dbr","Levels/Region0A010.lvl",1101,0,100,DisplayName:"Ferry"),
+            new WorldMarkerRecord("lore-1000m","Lore Note","records/items/loreobjects/near.dbr","Levels/Region0A010.lvl",1100,0,100),
+            new WorldMarkerRecord("lore-1200m","Lore Note","records/items/loreobjects/far.dbr","Levels/Region0A010.lvl",1300,0,100),
+            new WorldMarkerRecord("vendor-1001m","Vendor","records/creatures/npcs/merchants/far.dbr","Levels/Region0A010.lvl",1101,0,100),
+            new WorldMarkerRecord("altar-1001m","Ascension Altar","records/interactive/ascension_far.dbr","Levels/Region0A010.lvl",1101,0,100),
+            new WorldMarkerRecord("rift-1500m","Riftgate","records/ui/riftgatemap/locations/far.dbr","Levels/Region0A010.lvl",1600,0,100,DisplayName:"Far Rift")
+        };
+        var localPoiRangeResult=NavigationOverlayProjection.Build(domainPlayer,localPoiRangeTest,[],false,true,40,"Levels/Region0A001.lvl");
+        require(localPoiRangeResult.Select(p=>p.Marker.Id).ToHashSet().SetEquals(["boat-1000m","ferry-900m","lore-1000m","rift-1500m"]),
+            "non-rift local POIs (boats, ferries, lore, vendors, altars) appear only within 1000m while distant rifts remain visible");
+        var liveRowBoats=new[]{
+            new WorldMarkerRecord("live-boat-near","Travel Utility","live://minimap/20","live://current-map",110,0,100,["$live"],"Row Boat"),
+            new WorldMarkerRecord("live-boat-far","Travel Utility","live://minimap/20","live://current-map",1101,0,100,["$live"],"Row Boat")
+        };
+        require(NavigationOverlayProjection.Build(domainPlayer,liveRowBoats,[],false,true,40,"Levels/Region0A001.lvl")
+                .Single().Marker.Id=="live-boat-near",
+            "live row boats follow the 1000m distance cap while nearby boats remain visible");
+        require(PoiFilters.Group("Riftgate")==PoiFilter.Riftgates &&
+                PoiFilters.Group("Travel Utility")==PoiFilter.Travel &&
+                PoiFilters.MigrateFilter((PoiFilter)8191,0)==PoiFilter.All &&
+                PoiFilters.MigrateFilter((PoiFilter)8191 & ~PoiFilter.Travel,0)==((PoiFilter)8191 & ~PoiFilter.Travel) &&
+                PoiFilters.MigrateFilter(PoiFilter.Travel,PoiFilters.CurrentFilterVersion)==PoiFilter.Travel,
+            "rifts and travel utilities use distinct filter flags with legacy settings migration");
+        var riftVsBoatMarkers=new[]{
+            new WorldMarkerRecord("split-rift","Riftgate","records/ui/riftgatemap/locations/riftgate_1.dbr","Levels/Region0A001.lvl",300,0,100,DisplayName:"Rift"),
+            new WorldMarkerRecord("split-boat","Travel Utility","records/interactive/boat_1.dbr","Levels/Region0A010.lvl",112,0,100,DisplayName:"Row Boat")
+        };
+        require(NavigationOverlayProjection.Build(domainPlayer,riftVsBoatMarkers,[],false,true,40,"Levels/Region0A001.lvl",poiFilter:PoiFilter.All & ~PoiFilter.Travel)
+                .Single().Marker.Id=="split-rift" &&
+                NavigationOverlayProjection.Build(domainPlayer,riftVsBoatMarkers,[],false,true,40,"Levels/Region0A001.lvl",poiFilter:PoiFilter.All & ~PoiFilter.Riftgates)
+                .Single().Marker.Id=="split-boat",
+            "rifts and travel utilities toggle independently in navigation projection");
+
+        var chestPoints=new[]{
+            new WorldMarkerRecord("chest-1","One-Shot Chest","records/items/lootchests/oneshotchests/d01.dbr","Levels/Region0A001.lvl",120,0,100,ExcludedTokens:["DUNGEONCHEST_A"]),
+            new WorldMarkerRecord("chest-2a","One-Shot Chest","records/items/lootchests/oneshotchests/d04.dbr","Levels/Region0A058.lvl",220,0,100,ExcludedTokens:["DUNGEONCHEST_B"]),
+            new WorldMarkerRecord("chest-2b","One-Shot Chest","records/items/lootchests/oneshotchests/d04.dbr","Levels/Region0A058.lvl",260,0,100,ExcludedTokens:["DUNGEONCHEST_B"]),
+            new WorldMarkerRecord("chest-3","One-Shot Chest","records/items/lootchests/oneshotchests/d08.dbr","Levels/Region0B001.lvl",350,0,100,ExcludedTokens:["DUNGEONCHEST_C"]),
+            new WorldMarkerRecord("chest-too-far","One-Shot Chest","records/items/lootchests/oneshotchests/d09.dbr","Levels/Region0B002.lvl",1101,0,100,ExcludedTokens:["DUNGEONCHEST_FAR"]),
+            new WorldMarkerRecord("chest-ug","One-Shot Chest","records/items/lootchests/oneshotchests/d02.dbr","Levels/Undergrounds/RegionUG_CaveBurial_A01.lvl",110,0,100,ExcludedTokens:["DUNGEONCHEST_UG"])
+        };
+        var crowdedWithChests=Enumerable.Range(0,10)
+            .Select(i=>new WorldMarkerRecord($"near-npc-chest-{i}","Vendor",$"live://vendor/{i}","live://current-map",105+i,0,100,["$live"]))
+            .Concat(chestPoints).ToArray();
+        var closestNearbyChest=NavigationOverlayProjection.Build(domainPlayer,crowdedWithChests,[],false,true,40,"Levels/Region0A001.lvl");
+        require(closestNearbyChest.Count(x=>x.Marker.Category=="One-Shot Chest")==4 &&
+                closestNearbyChest.Any(x=>x.Marker.Id=="chest-1" && !x.IsDistant) &&
+                closestNearbyChest.Any(x=>x.Marker.Id=="chest-2a" && x.IsDistant) &&
+                closestNearbyChest.Any(x=>x.Marker.Id=="chest-2b" && x.IsDistant) &&
+                closestNearbyChest.Any(x=>x.Marker.Id=="chest-3" && x.IsDistant) &&
+                closestNearbyChest.All(x=>x.Marker.Id!="chest-too-far"),
+            "one-shot chests show all un-opened chests within 1000m and exclude chests beyond 1000m even when nearby POIs exceed MinimumPoiTargets");
+        var skippedFirstChest=NavigationOverlayProjection.Build(domainPlayer,crowdedWithChests,[],false,true,40,"Levels/Region0A001.lvl",
+            openedChestTokens:new HashSet<string>(StringComparer.OrdinalIgnoreCase){"dungeonchest_a"});
+        require(skippedFirstChest.Where(x=>x.Marker.Category=="One-Shot Chest").Select(x=>x.Marker.Id).ToHashSet().SetEquals(["chest-2a","chest-2b","chest-3"]) &&
+                skippedFirstChest.Where(x=>x.Marker.Category=="One-Shot Chest").All(x=>x.IsDistant),
+            "opened one-shot chests are filtered out case-insensitively while retaining remaining chests within 1000m");
+        var skippedSharedSetChest=NavigationOverlayProjection.Build(domainPlayer,chestPoints,[],false,true,40,"Levels/Region0A001.lvl",
+            openedChestTokens:new HashSet<string>(StringComparer.OrdinalIgnoreCase){"DUNGEONCHEST_A","DUNGEONCHEST_B"});
+        require(skippedSharedSetChest.Single().Marker.Id=="chest-3",
+            "multi-placement set-piece chests sharing an opened token are all excluded");
+        require(NavigationOverlayProjection.Build(domainPlayer,chestPoints,[],false,true,40,"Levels/Region0A001.lvl",
+                poiFilter:PoiFilter.All & ~PoiFilter.Chests).Count==0 &&
+                NavigationOverlayProjection.Build(domainPlayer,chestPoints,[],false,true,40,"Levels/Undergrounds/RegionUG_CaveBurial_A02.lvl")
+                .Single().Marker.Id=="chest-ug",
+            "one-shot chests respect the Chests POI filter and overworld vs. underground locale separation");
+        var candidateTokens=NavigationOverlayProjection.CandidateOneShotChestTokens(domainPlayer,chestPoints,"Levels/Region0A001.lvl",
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase){"DUNGEONCHEST_A"}).SelectMany(x=>x).ToArray();
+        require(candidateTokens.SequenceEqual(["DUNGEONCHEST_B","DUNGEONCHEST_C"]),
+            "candidate one-shot chest tokens are ordered closest-first within 1000m and locale, deduplicated, and skip known opened tokens");
         var limits=CharacterResourceLimits.Parse("OK RESOURCE_LIMITS 10 100 3 2000000000 250 109 55 20 9 3 10 10 5 8 0");
         require(limits.Available(1,true)==9980 && limits.Available(2,true)==9991 && limits.Available(3,true)==9997 && limits.EffectiveCap(0,true)==2_000_000_000 && limits.Available(1)==230,"bypass applies only to allocated-adjusted point pools and never changes normal budgets");
         require(CharacterResourcePreparation.Parse("OK RESOURCE_PREPARED 7 3 5 1000 9997 3 10000 0054").Target==1000,"bounded above-cap preparation is parsed without truncation");
@@ -81,7 +211,7 @@ internal static class AffixAndPoiRegressionTests
         client.DisposeAsync().AsTask().GetAwaiter().GetResult();
         var markup=XDocument.Load(Path.Combine(root,"src/GrimDawnCompanion.App/MainWindow.xaml"));XNamespace x="http://schemas.microsoft.com/winfx/2006/xaml";
         var checks=markup.Descendants().Single(e=>(string?)e.Attribute(x+"Name")=="PoiTypesPanel").Elements().Where(e=>e.Name.LocalName=="CheckBox");
-        require(checks.Count()==13 && checks.Select(c=>Enum.Parse<PoiFilter>((string)c.Attribute("Tag")!)).Aggregate(PoiFilter.None,(a,b)=>a|b)==PoiFilter.All,"all supported POI categories have unique filter toggles");
+        require(checks.Count()==14 && checks.Select(c=>Enum.Parse<PoiFilter>((string)c.Attribute("Tag")!)).Aggregate(PoiFilter.None,(a,b)=>a|b)==PoiFilter.All,"all supported POI categories have unique filter toggles");
         var bypass=markup.Descendants().Single(e=>(string?)e.Attribute(x+"Name")=="ResourceCapBypassBox");
         require(bypass.Attribute("IsChecked") is null,"natural cap bypass defaults off");
     }

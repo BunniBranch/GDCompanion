@@ -26,6 +26,8 @@ set_property(TARGET GrimDawnBridge PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$
 set_target_properties(GrimDawnBridge PROPERTIES OUTPUT_NAME "GrimDawnBridge")
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 add_executable(MasteryRespecTests MasteryRespecTests.cpp)
+add_executable(RestoredShrinesTests RestoredShrinesTests.cpp)
+target_compile_features(RestoredShrinesTests PRIVATE cxx_std_20)
 add_executable(QuestStageCaptureTests QuestStageCaptureTests.cpp)
 add_executable(RadarCanvasStateTests RadarCanvasStateTests.cpp)
 add_executable(CharacterLevelTests CharacterLevelTests.cpp)

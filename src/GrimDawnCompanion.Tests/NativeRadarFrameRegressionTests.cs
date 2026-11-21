@@ -57,6 +57,21 @@ internal static class NativeRadarFrameRegressionTests
         require(DecodeLabel(riftPoint with { Distance = double.NaN }) == "Devil's Crossing Rift" &&
                 DecodeLabel(riftPoint with { Distance = -5 }) == "Devil's Crossing Rift",
             "native hover labels omit non-finite or negative distances");
+        string DecodeKind(NavigationOverlayPoint item, bool supportsTravelKind = true) =>
+            NativeRadarFrame.Commands(9, [item], supportsTravelKind)[1].Split('\t')[3].Split(',')[2];
+        var boatPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("boat", "Travel Utility", "records/interactive/boat.dbr", "Levels/Region0A010.lvl", 10, 0, 20, DisplayName: "Row Boat"),
+            10, 0, 0, false);
+        var liveBoatPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("live-boat", "Travel Utility", "live://minimap/20", "live://current-map", 10, 0, 20, ["$live"], "Row Boat"),
+            10, 0, 0, false);
+        var legacyLiveRiftPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("live-rift", "Travel Utility", "live://minimap/3", "live://current-map", 10, 0, 20, ["$live"], "Riftgate"),
+            10, 0, 0, false);
+        require(DecodeKind(riftPoint) == "3" && DecodeKind(legacyLiveRiftPoint) == "3" &&
+                DecodeKind(boatPoint) == "7" && DecodeKind(liveBoatPoint) == "7" &&
+                DecodeKind(boatPoint, supportsTravelKind: false) == "3",
+            "native radar assigns distinct kinds to rifts and travel utilities with legacy bridge fallback");
         require(NativeRadarFrame.Commands(9, []).SequenceEqual(new[] { "RADAR\tCANVAS\tBEGIN\t9\t0", "RADAR\tCANVAS\tCOMMIT" }),
             "native empty frame explicitly clears previous targets");
         Reject(() => NativeRadarFrame.Commands(0, [point]));

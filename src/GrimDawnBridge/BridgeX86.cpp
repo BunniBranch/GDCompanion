@@ -158,7 +158,7 @@ namespace
                 sprintf_s(response, "ERROR INIT %lu", g_error.load());
                 Reply(pipe, response);
             }
-            else Reply(pipe, "PONG 38 READY CAPS=LUA_SYNC,UNLOAD,X86");
+            else Reply(pipe, "PONG 39 READY CAPS=LUA_SYNC,UNLOAD,X86");
             return;
         }
         if (!g_ready) { Reply(pipe, "ERROR NOT_READY"); return; }
@@ -250,7 +250,7 @@ namespace
     }
 }
 
-extern "C" __declspec(dllexport) unsigned int GrimDawnCompanionBridgeVersion() { return 38; }
+extern "C" __declspec(dllexport) unsigned int GrimDawnCompanionBridgeVersion() { return 39; }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {

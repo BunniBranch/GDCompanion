@@ -162,7 +162,8 @@ Require(masteryTab.Descendants(presentation + "Button").Single(button => (string
 Require(!masteryTab.ToString().Contains("experimental", StringComparison.OrdinalIgnoreCase) &&
         !masteryTab.ToString().Contains("disposable", StringComparison.OrdinalIgnoreCase),
     "mastery respec UI no longer carries experimental or disposable-character labels");
-var masteryResetSource = File.ReadAllText(Path.Combine(root, "src", "GrimDawnCompanion.App", "MainWindow.MasteryAudit.cs"));
+var masteryResetSource = File.ReadAllText(Path.Combine(root, "src", "GrimDawnCompanion.App", "MainWindow.MasteryAudit.cs"))
+    .Replace("\r\n", "\n", StringComparison.Ordinal);
 Require(!masteryResetSource.Contains("Class-dependent stats, equipment, pets, buffs and hotbar references have not been exhaustively validated.", StringComparison.Ordinal) &&
         masteryResetSource.Contains("further attempts.\\n\\nChoose new masteries in the game's skill window.", StringComparison.Ordinal),
     "respec confirmation removes the requested warning sentence and gives new-class instructions their own paragraph");
@@ -293,6 +294,9 @@ Require(worldMarkers.SourceFingerprint == taskAwareMapFingerprint, "quest metada
 Console.WriteLine($"INFO  {worldMarkers.Markers.Count:N0} world markers decoded");
 Require(worldMarkers.Markers.Count >= 50, "world marker catalog is rebuilt from installed level placements");
 Require(worldMarkers.Markers.Count(x => x.Category == "Devotion Shrine") >= 10, "world marker catalog contains decoded devotion shrine coordinates");
+Require(worldMarkers.Markers.Where(x => x.Category == "Devotion Shrine")
+        .All(x => x.EntityUid is { Length: 32 } uid && uid.All(Uri.IsHexDigit)),
+    "world marker catalog decodes a 16-byte entity UID for every devotion shrine placement");
 Require(worldMarkers.Markers.Any(x => x.LevelPath.Equals("Levels/Region0B003.lvl", StringComparison.OrdinalIgnoreCase) &&
                                       x.Category == "Devotion Shrine" &&
                                       Math.Abs(x.WorldX + 1071.57772f) < 0.01f && Math.Abs(x.WorldZ - 585.84719f) < 0.01f),
@@ -325,6 +329,20 @@ Require(catalogRifts.All(m => !string.IsNullOrWhiteSpace(m.DisplayName) &&
                               !m.DisplayName.StartsWith("tag", StringComparison.OrdinalIgnoreCase)) &&
         catalogRifts.Any(m => m.DisplayName == "Devil's Crossing Rift"),
     "installed catalog Riftgates resolve localized display names instead of generic labels");
+var catalogShrines = worldMarkers.Markers.Where(m => m.Category == "Devotion Shrine").ToArray();
+var ultimateOnlyShrine = catalogShrines.Single(m =>
+    m.RecordPath.EndsWith("/devotionshrinen10.dbr", StringComparison.OrdinalIgnoreCase));
+var secretHiddenShrine = catalogShrines.Single(m =>
+    m.RecordPath.EndsWith("/devotionshrines03.dbr", StringComparison.OrdinalIgnoreCase));
+Require((ultimateOnlyShrine.DisabledDifficultiesMask & 3) == 3 &&
+        (ultimateOnlyShrine.DisabledDifficultiesMask & 4) == 0 &&
+        secretHiddenShrine.HideMapIcon,
+    "installed catalog devotion shrines decode difficulty disable flags and hidden icon flags");
+var catalogChests = worldMarkers.Markers.Where(m => m.Category == "One-Shot Chest").ToArray();
+Require(catalogChests.Length >= 50 &&
+        catalogChests.All(m => m.ExcludedTokens is { Length: 1 } &&
+                               m.ExcludedTokens[0].StartsWith("DUNGEONCHEST", StringComparison.Ordinal)),
+    "installed catalog one-shot chests resolve their open-state player tokens");
 QuestMarkerHandoffRegressionTests.Run(worldMarkers.Markers);
 
 var projectionPlayer = new WorldPosition(100, 0, 100);
@@ -368,9 +386,11 @@ Require(projectedRifts.Any(x => x.Marker.Id == "far-catalog-rift" && x.IsDistant
         projectedRifts.All(x => x.Marker.Id != "far-catalog-rift-2"),
     "navigation projection keeps only the two closest distant riftgates at the radar rim even when nearby POIs exceed MinimumPoiTargets");
 var filteredRifts = NavigationOverlayProjection.Build(projectionPlayer, crowdedRiftMarkers, [], false, true, 40, "Levels/Region0A001.lvl",
-    poiFilter: PoiFilter.All & ~PoiFilter.Travel);
-Require(filteredRifts.All(x => x.Marker.Id is not "far-catalog-rift" and not "far-live-rift"),
-    "navigation projection respects Travel POI filter for distant riftgates");
+    poiFilter: PoiFilter.All & ~PoiFilter.Riftgates);
+Require(filteredRifts.All(x => x.Marker.Id is not "far-catalog-rift" and not "far-live-rift") &&
+        NavigationOverlayProjection.Build(projectionPlayer, crowdedRiftMarkers, [], false, true, 40, "Levels/Region0A001.lvl",
+            poiFilter: PoiFilter.All & ~PoiFilter.Travel).Any(x => x.Marker.Id == "far-catalog-rift"),
+    "navigation projection respects Riftgates POI filter independently of Travel utilities");
 var wildernessRiftMarkers = Enumerable.Range(1, 5)
     .Select(i => new WorldMarkerRecord($"wild-rift-{i}", "Riftgate", $"records/ui/riftgatemap/locations/riftgate_{i}.dbr",
         "Levels/Region0A001.lvl", 100 + i * 100, 0, 100))
@@ -410,6 +430,107 @@ var enrichedLiveRifts = NavigationOverlayProjection.Build(projectionPlayer, gene
 Require(enrichedLiveRifts.Count == 1 && enrichedLiveRifts[0].Marker.Id == "live-rift-near" &&
         enrichedLiveRifts[0].Marker.DisplayName == "Devil's Crossing Rift",
     "navigation projection enriches generic nearby live riftgate labels from co-located catalog riftgates");
+var restoredUid = "9DAD78650645D99B7DE6EDB1C32E5F80";
+var unrestoredUid = "0123456789ABCDEF0123456789ABCDEF";
+var shrineMarkers = new[]
+{
+    new WorldMarkerRecord("live-restored-shrine", "Devotion Shrine", "live://minimap/16", "live://current-map", 110, 0, 100, ["$live"], "Restored Shrine"),
+    new WorldMarkerRecord("live-ruined-shrine", "Devotion Shrine", "live://minimap/16", "live://current-map", 120, 0, 100, ["$live"], "Ruined Shrine"),
+    new WorldMarkerRecord("catalog-restored-shrine", "Devotion Shrine", "records/interactive/devotionshrine_01.dbr", "Levels/Region0B003.lvl", 220, 0, 100, EntityUid: restoredUid),
+    new WorldMarkerRecord("catalog-unrestored-shrine", "Devotion Shrine", "records/interactive/devotionshrine_02.dbr", "Levels/Region0B003.lvl", 450, 0, 100, EntityUid: unrestoredUid),
+    new WorldMarkerRecord("catalog-regional-quest", "Quest Objective", "records/quest.dbr", "Levels/Region0B003.lvl", 600, 0, 100, ["quests/test.qst"])
+};
+var filteredShrines = NavigationOverlayProjection.Build(projectionPlayer, shrineMarkers, ["quests/test.qst"], true, true, 40,
+    restoredShrineUids: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { restoredUid });
+Require(filteredShrines.All(x => x.Marker.Id is not "live-restored-shrine" and not "catalog-restored-shrine") &&
+        filteredShrines.Count(x => x.Marker.Category == "Devotion Shrine") == 2 &&
+        filteredShrines.Any(x => x.Marker.Id == "live-ruined-shrine") &&
+        filteredShrines.Any(x => x.Marker.Id == "catalog-unrestored-shrine") &&
+        filteredShrines.Any(x => x.Marker.Id == "catalog-regional-quest"),
+    "navigation projection hides restored shrines, shows all non-restored shrines within 1000m, and keeps regional quest anchoring");
+var multiDistantShrines = new[] { 200, 600, 1000, 1001, 1500 }
+    .Select((distance, i) => new WorldMarkerRecord($"shrine-{i + 1}", "Devotion Shrine", $"records/shrine_{i + 1}.dbr", "Levels/Region0B003.lvl",
+        100 + distance, 0, 100, EntityUid: unrestoredUid))
+    .ToArray();
+var shrinesWithinRange = NavigationOverlayProjection.Build(projectionPlayer, multiDistantShrines, [], false, true, 40);
+Require(shrinesWithinRange.Select(x => x.Marker.Id).SequenceEqual(["shrine-1", "shrine-2", "shrine-3"]),
+    "navigation projection includes all distant devotion shrines within 1000m and excludes shrines beyond 1000m without leaking into fallback slots");
+var restoredCloserShrine = new[]
+{
+    new WorldMarkerRecord("restored-close", "Devotion Shrine", "records/shrine_r.dbr", "Levels/Region0B003.lvl", 200, 0, 100, EntityUid: restoredUid),
+    new WorldMarkerRecord("unrestored-mid", "Devotion Shrine", "records/shrine_m.dbr", "Levels/Region0B003.lvl", 300, 0, 100, EntityUid: unrestoredUid),
+    new WorldMarkerRecord("unrestored-far", "Devotion Shrine", "records/shrine_f.dbr", "Levels/Region0B003.lvl", 500, 0, 100, EntityUid: "FEDCBA9876543210FEDCBA9876543210"),
+    new WorldMarkerRecord("unrestored-too-far", "Devotion Shrine", "records/shrine_tf.dbr", "Levels/Region0B003.lvl", 1300, 0, 100, EntityUid: "11111111111111111111111111111111")
+};
+var skippedRestoredShrine = NavigationOverlayProjection.Build(projectionPlayer, restoredCloserShrine, [], false, true, 40,
+    restoredShrineUids: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { restoredUid });
+Require(skippedRestoredShrine.Select(x => x.Marker.Id).SequenceEqual(["unrestored-mid", "unrestored-far"]),
+    "navigation projection skips restored and out-of-range shrines while showing all remaining non-restored shrines within 1000m");
+var crowdedShrinePois = Enumerable.Range(0, 10)
+    .Select(i => new WorldMarkerRecord($"near-vendor-{i}", "Vendor", $"live://vendor/{i}", "live://current-map", 105 + i, 0, 100, ["$live"]))
+    .Concat([
+        new WorldMarkerRecord("distant-shrine-1", "Devotion Shrine", "records/shrine_d1.dbr", "Levels/Region0A001.lvl", 250, 0, 100, EntityUid: unrestoredUid),
+        new WorldMarkerRecord("distant-shrine-2", "Devotion Shrine", "records/shrine_d2.dbr", "Levels/Region0A001.lvl", 400, 0, 100, EntityUid: "FEDCBA9876543210FEDCBA9876543210"),
+        new WorldMarkerRecord("distant-shrine-3", "Devotion Shrine", "records/shrine_d3.dbr", "Levels/Region0A001.lvl", 1200, 0, 100, EntityUid: "22222222222222222222222222222222")
+    ])
+    .ToArray();
+var projectedCrowdedShrines = NavigationOverlayProjection.Build(projectionPlayer, crowdedShrinePois, [], false, true, 40);
+Require(projectedCrowdedShrines.Count(x => x.Marker.Category == "Devotion Shrine") == 2 &&
+        projectedCrowdedShrines.Any(x => x.Marker.Id == "distant-shrine-1" && x.IsDistant) &&
+        projectedCrowdedShrines.Any(x => x.Marker.Id == "distant-shrine-2" && x.IsDistant) &&
+        projectedCrowdedShrines.All(x => x.Marker.Id != "distant-shrine-3"),
+    "navigation projection shows all distant shrines within 1000m even when nearby POIs exceed MinimumPoiTargets");
+Require(NavigationOverlayProjection.Build(projectionPlayer, crowdedShrinePois, [], false, true, 40,
+        poiFilter: PoiFilter.All & ~PoiFilter.DevotionShrines).All(x => x.Marker.Category != "Devotion Shrine"),
+    "navigation projection respects DevotionShrines POI filter");
+var difficultyShrines = new[]
+{
+    new WorldMarkerRecord("hidden-closest", "Devotion Shrine", "records/shrine_hidden.dbr", "Levels/RegionVoid_SecretB01.lvl", 220, 0, 100, EntityUid: unrestoredUid, HideMapIcon: true),
+    new WorldMarkerRecord("normal-disabled", "Devotion Shrine", "records/shrine_ult.dbr", "Levels/Region0A023.lvl", 250, 0, 100, EntityUid: unrestoredUid, DisabledDifficultiesMask: 1),
+    new WorldMarkerRecord("normal-active", "Devotion Shrine", "records/shrine_norm.dbr", "Levels/Region0A010.lvl", 450, 0, 100, EntityUid: unrestoredUid)
+};
+Require(NavigationOverlayProjection.Build(projectionPlayer, difficultyShrines, [], false, true, 40, gameDifficulty: 0)
+        .Select(x => x.Marker.Id).SequenceEqual(["normal-active"]) &&
+        NavigationOverlayProjection.Build(projectionPlayer, difficultyShrines, [], false, true, 40, gameDifficulty: 1)
+        .Select(x => x.Marker.Id).SequenceEqual(["normal-disabled", "normal-active"]) &&
+        NavigationOverlayProjection.Build(projectionPlayer, difficultyShrines, [], false, true, 40)
+        .Select(x => x.Marker.Id).SequenceEqual(["normal-disabled", "normal-active"]),
+    "navigation projection hides map-hidden shrines on all difficulties and skips difficulty-disabled shrines when difficulty is known");
+var locationDomainShrines = new[]
+{
+    new WorldMarkerRecord("ug-closest", "Devotion Shrine", "records/shrine_ug1.dbr", "Levels/Undergrounds/RegionUG_CaveBurial_A02.lvl", 180, 0, 100, EntityUid: unrestoredUid),
+    new WorldMarkerRecord("void-closer", "Devotion Shrine", "records/shrine_void.dbr", "Levels/Void/RegionVoid_BastionOfChaosA02.lvl", 220, 0, 100, EntityUid: unrestoredUid),
+    new WorldMarkerRecord("other-ug", "Devotion Shrine", "records/shrine_ug2.dbr", "Levels/Undergrounds/RegionUG_DCPrisonCellar_A03.lvl", 240, 0, 100, EntityUid: unrestoredUid),
+    new WorldMarkerRecord("overworld-far", "Devotion Shrine", "records/shrine_ow.dbr", "Levels/Region0B032.lvl", 400, 0, 100, EntityUid: unrestoredUid)
+};
+var liveUgShrine = new WorldMarkerRecord("live-ug-shrine", "Devotion Shrine", "live://minimap/16", "live://current-map", 120, 0, 100, ["$live"], "Ruined Shrine");
+Require(NavigationOverlayProjection.Build(projectionPlayer, locationDomainShrines, [], false, true, 40, "Levels/Region0A001.lvl")
+        .Single().Marker.Id == "overworld-far" &&
+        NavigationOverlayProjection.Build(projectionPlayer, locationDomainShrines, [], false, true, 40, "Levels/Undergrounds/RegionUG_CaveBurial_A01.lvl")
+        .Single().Marker.Id == "ug-closest" &&
+        NavigationOverlayProjection.Build(projectionPlayer, locationDomainShrines, [], false, true, 40, "Levels/Undergrounds/RegionUG_SmugglersBasin_A01.lvl")
+        .Count == 0 &&
+        NavigationOverlayProjection.Build(projectionPlayer, locationDomainShrines.Append(liveUgShrine), [], false, true, 40, "Levels/Undergrounds/RegionUG_SmugglersBasin_A01.lvl")
+        .Single().Marker.Id == "live-ug-shrine",
+    "navigation projection separates overworld and underground catalog shrines while preserving live shrines");
+var shrineStateZero = GameBridgeClient.ParseRestoredShrineState("OK RESTORED_SHRINES 0");
+var shrineStateDiffZero = GameBridgeClient.ParseRestoredShrineState("OK RESTORED_SHRINES 0 DIFF=0");
+var shrineStateDiffTwo = GameBridgeClient.ParseRestoredShrineState($"OK RESTORED_SHRINES 2 DIFF=2\t{restoredUid.ToLowerInvariant()}\t{unrestoredUid}");
+var shrineStateBadDiff = GameBridgeClient.ParseRestoredShrineState("OK RESTORED_SHRINES 0 DIFF=9");
+Require(shrineStateZero is { Uids.Count: 0, Difficulty: null } &&
+        shrineStateDiffZero is { Uids.Count: 0, Difficulty: 0 } &&
+        shrineStateDiffTwo is { Difficulty: 2 } && shrineStateDiffTwo.Uids.SetEquals([restoredUid, unrestoredUid]) &&
+        shrineStateBadDiff is { Uids.Count: 0, Difficulty: null } &&
+        GameBridgeClient.ParseRestoredShrineState("OK RESTORED_SHRINES WAITING") is null &&
+        GameBridgeClient.ParseRestoredShrineUids($"OK RESTORED_SHRINES 2\t{restoredUid.ToLowerInvariant()}\t{unrestoredUid}")!.SetEquals([restoredUid, unrestoredUid]),
+    "bridge client parses restored shrine UniqueIds, difficulty header, and waiting states");
+var shrineCapClient = new GameBridgeClient();
+typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.Capabilities))!.SetValue(shrineCapClient, new HashSet<string> { "RESTORED_SHRINES" });
+typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.ProtocolVersion))!.SetValue(shrineCapClient, 38);
+var unsupportedAt38 = shrineCapClient.SupportsRestoredShrines;
+typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.ProtocolVersion))!.SetValue(shrineCapClient, 39);
+Require(!unsupportedAt38 && shrineCapClient.SupportsRestoredShrines, "restored shrine filtering requires bridge protocol 39");
+await shrineCapClient.DisposeAsync();
 var projectedQuests = NavigationOverlayProjection.Build(projectionPlayer, projectionMarkers, ["quests/test.qst"], true, false, 40);
 Require(projectedQuests.Any(x => x.Marker.Id == "far-quest" && x.IsDistant),
     "navigation projection draws distant live quest objectives at the radar rim");
@@ -536,7 +657,9 @@ var navigationSymbols = new[]
     "Quest2Repository::GetQuests()", "Quest2::GetFileName()", "AscendantAltar::IsOfInterest()", "DynamicTeleporter::IsOfInterest()",
     "FixedDoor::IsOfInterest()", "FixedDoor::UpdateSelf(int)", "FixedDoor::GetGameDescription()",
     "FixedItemContainer::IsOfInterest()", "FixedItemShrine::IsOfInterest()", "MonsterShrine::IsOfInterest()",
-    "StaticShrine::IsOfInterest()", "StaticTeleporter::IsOfInterest()", "StaticTeleporter::AppendDetailMapData()"
+    "StaticShrine::IsOfInterest()", "StaticShrine::IsCleansed()", "StaticShrine::IsActiveForMainPlayer()",
+    "StaticShrine::AppendDetailMapData()", "Player::GetShrineUIDs()",
+    "StaticTeleporter::IsOfInterest()", "StaticTeleporter::AppendDetailMapData()"
 };
 Require(navigationSymbols.All(name => compatibility.Symbols.Any(x => x.FriendlyName == name && x.Found)), "native radar data exports resolve for this game patch");
 var assistNativeSource = File.ReadAllText(Path.Combine(root, "src", "GrimDawnBridge", "GameplayAssists.h"));

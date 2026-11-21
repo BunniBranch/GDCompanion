@@ -46,6 +46,8 @@ if (-not $SkipTests -and $Architecture -eq 'x64') {
     if ($LASTEXITCODE -ne 0) { throw 'Native persistent bookmark tests failed.' }
     & (Join-Path $nativeBuild 'MasteryRespecTests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Native mastery transaction tests failed.' }
+    & (Join-Path $nativeBuild 'RestoredShrinesTests.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Native restored shrines tests failed.' }
     & (Join-Path $nativeBuild 'GameplayAssistTests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Native gameplay assist tests failed.' }
     & (Join-Path $nativeBuild 'GameplayAssistRuntimeTests.exe')

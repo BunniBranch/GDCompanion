@@ -23,6 +23,7 @@
 #include "CharacterLevel.h"
 #include "CharacterResource.h"
 #include "ItemAffixes.h"
+#include "RestoredShrines.h"
 
 namespace
 {
@@ -59,6 +60,11 @@ namespace
     constexpr char kStaticShrineInterestExport[] = "?IsOfInterest@StaticShrine@GAME@@UEBA_NXZ";
     constexpr char kStaticTeleporterInterestExport[] = "?IsOfInterest@StaticTeleporter@GAME@@UEBA_NXZ";
     constexpr char kStaticTeleporterAppendExport[] = "?AppendDetailMapData@StaticTeleporter@GAME@@UEAAXAEAV?$vector@UMinimapGameNugget@GAME@@@mem@@@Z";
+    constexpr char kGetShrineUidsExport[] = "?GetShrineUIDs@Player@GAME@@QEBAAEBV?$vector@VUniqueId@GAME@@@mem@@XZ";
+    constexpr char kGetGameDifficultyExport[] = "?GetGameDifficulty@GameEngine@GAME@@QEBA?AW4GameDifficulty@2@XZ";
+    constexpr char kStaticShrineIsCleansedExport[] = "?IsCleansed@StaticShrine@GAME@@QEBA_NXZ";
+    constexpr char kStaticShrineActiveExport[] = "?IsActiveForMainPlayer@StaticShrine@GAME@@QEAA_NXZ";
+    constexpr char kStaticShrineAppendExport[] = "?AppendDetailMapData@StaticShrine@GAME@@UEAAXAEAV?$vector@UMinimapGameNugget@GAME@@@mem@@@Z";
     constexpr size_t kMinimapNuggetSize = 0xA0;
     constexpr size_t kCommandSize = 4096;
     constexpr size_t kResponseSize = 8192;
@@ -72,7 +78,7 @@ namespace
     constexpr size_t kForcedTravelMarkerSlots = 16;
     constexpr size_t kObservedFixedDoorSlots = 128;
 
-    enum class WorkKind { Lua, ResourceGet, TokenHas, PlayerPosition, PlayerRegion, MasteryAudit, MasteryRespec, Assists, Bookmark, QuestTasks, CharacterLevel, ResourceSet, ItemAffix };
+    enum class WorkKind { Lua, ResourceGet, TokenHas, PlayerPosition, PlayerRegion, MasteryAudit, MasteryRespec, Assists, Bookmark, QuestTasks, CharacterLevel, ResourceSet, ItemAffix, RestoredShrines };
     enum class ResourceKind { Money, Skill, Attribute, Devotion };
 
     struct WorkRequest
@@ -143,6 +149,8 @@ namespace
     // first two registers and corrupts the FixedDoor object.
     using GetGameDescriptionFunction = void(__fastcall*)(void*, std::wstring*, bool, bool);
     using VectorAppendFunction = void(__fastcall*)(void*, const void*);
+    using GetShrineUidsFunction = const struct RawVectorView&(__fastcall*)(void*);
+    using StaticShrineBoolFunction = bool(__fastcall*)(void*);
 
     struct RawVectorView
     {
@@ -187,6 +195,15 @@ namespace
     void* g_fixedDoorUpdateTarget = nullptr;
     void* g_staticTeleporterAppendTarget = nullptr;
     VectorAppendFunction g_vectorAppend = nullptr;
+    GetShrineUidsFunction g_getShrineUids = nullptr;
+    GetResourceFunction g_getGameDifficulty = nullptr;
+    StaticShrineBoolFunction g_staticShrineIsCleansed = nullptr;
+    StaticShrineBoolFunction g_staticShrineIsActiveForMainPlayer = nullptr;
+    AppendAreaMapDataFunction g_originalStaticShrineAppend = nullptr;
+    void* g_staticShrineAppendTarget = nullptr;
+    SRWLOCK g_restoredShrineLock = SRWLOCK_INIT;
+    std::array<LiveMapMarker, kLiveMapMarkerSlots> g_restoredShrines{};
+    size_t g_restoredShrineCount = 0;
     CRITICAL_SECTION g_queueLock{};
     SRWLOCK g_worldMarkerLock = SRWLOCK_INIT;
     SRWLOCK g_activeQuestLock = SRWLOCK_INIT;
@@ -378,6 +395,19 @@ namespace
                     if (marker.type == 8 || marker.type == 14) continue;
                     if (!g_capturePointOfInterestMarkers.load(std::memory_order_relaxed)) continue;
                     if (!TryReadGlobalMapPosition(nugget, marker)) continue;
+                    if (marker.type == 16)
+                    {
+                        bool restored = false;
+                        AcquireSRWLockShared(&g_restoredShrineLock);
+                        for (size_t existing = 0; existing < g_restoredShrineCount; ++existing)
+                        {
+                            const auto dx = g_restoredShrines[existing].x - marker.x;
+                            const auto dz = g_restoredShrines[existing].z - marker.z;
+                            if (dx * dx + dz * dz < 0.0625f) { restored = true; break; }
+                        }
+                        ReleaseSRWLockShared(&g_restoredShrineLock);
+                        if (restored) continue;
+                    }
                     ReadLiveMapLabel(nugget, marker);
                     bool duplicate = false;
                     for (size_t existing = 0; existing < capturedCount; ++existing)
@@ -419,6 +449,9 @@ namespace
                 g_forcedTravelObjectCount = 0;
                 g_forcedTravelMarkerCount = 0;
                 ReleaseSRWLockExclusive(&g_forcedTravelLock);
+                AcquireSRWLockExclusive(&g_restoredShrineLock);
+                g_restoredShrineCount = 0;
+                ReleaseSRWLockExclusive(&g_restoredShrineLock);
             }
         }
         g_originalGetDetailMapData(engine, output, frustum);
@@ -589,6 +622,45 @@ namespace
             }
             ReleaseSRWLockExclusive(&g_forcedTravelLock);
         }
+    }
+
+    bool IsStaticShrineRestored(void* shrine)
+    {
+        __try
+        {
+            if (!shrine) return false;
+            return (g_staticShrineIsCleansed && g_staticShrineIsCleansed(shrine)) ||
+                   (g_staticShrineIsActiveForMainPlayer && g_staticShrineIsActiveForMainPlayer(shrine));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    void __fastcall HookedStaticShrineAppend(void* shrine, void* output)
+    {
+        const bool track = IsCollectingMapData() &&
+            g_capturePointOfInterestMarkers.load(std::memory_order_relaxed) && shrine && output;
+        const auto beforeVector = static_cast<const RawVectorView*>(output);
+        const auto beforeCount = track && beforeVector && beforeVector->begin && beforeVector->end >= beforeVector->begin
+            ? static_cast<size_t>(beforeVector->end - beforeVector->begin) / kMinimapNuggetSize : 0;
+        g_originalStaticShrineAppend(shrine, output);
+        if (!track || !IsStaticShrineRestored(shrine)) return;
+        const auto afterVector = static_cast<const RawVectorView*>(output);
+        const auto afterCount = afterVector && afterVector->begin && afterVector->end >= afterVector->begin
+            ? static_cast<size_t>(afterVector->end - afterVector->begin) / kMinimapNuggetSize : 0;
+        if (!afterVector || !afterVector->begin || afterCount <= beforeCount) return;
+        AcquireSRWLockExclusive(&g_restoredShrineLock);
+        for (size_t index = beforeCount; index < afterCount && g_restoredShrineCount < g_restoredShrines.size(); ++index)
+        {
+            const auto nugget = afterVector->begin + index * kMinimapNuggetSize;
+            unsigned int type = 0;
+            memcpy(&type, nugget + 8, sizeof(type));
+            if (type != 16) continue;
+            LiveMapMarker marker{};
+            marker.type = type;
+            if (TryReadGlobalMapPosition(nugget, marker))
+                g_restoredShrines[g_restoredShrineCount++] = marker;
+        }
+        ReleaseSRWLockExclusive(&g_restoredShrineLock);
     }
 
     bool __fastcall HookedIsMarkerUidKnown(void* player, const void* markerId)
@@ -856,6 +928,9 @@ namespace
         g_forcedTravelMarkerCount = 0;
         g_fixedDoorObservations = {};
         ReleaseSRWLockExclusive(&g_forcedTravelLock);
+        AcquireSRWLockExclusive(&g_restoredShrineLock);
+        g_restoredShrineCount = 0;
+        ReleaseSRWLockExclusive(&g_restoredShrineLock);
     }
 
     bool ParseFloat(const char* text, float& value)
@@ -958,6 +1033,9 @@ namespace
         g_getFixedDoorDescription = reinterpret_cast<GetGameDescriptionFunction>(GetProcAddress(game, kFixedDoorDescriptionExport));
         g_fixedDoorUpdateTarget = reinterpret_cast<void*>(GetProcAddress(game, kFixedDoorUpdateExport));
         g_staticTeleporterAppendTarget = reinterpret_cast<void*>(GetProcAddress(game, kStaticTeleporterAppendExport));
+        g_staticShrineIsCleansed = reinterpret_cast<StaticShrineBoolFunction>(GetProcAddress(game, kStaticShrineIsCleansedExport));
+        g_staticShrineIsActiveForMainPlayer = reinterpret_cast<StaticShrineBoolFunction>(GetProcAddress(game, kStaticShrineActiveExport));
+        g_staticShrineAppendTarget = reinterpret_cast<void*>(GetProcAddress(game, kStaticShrineAppendExport));
         constexpr std::array<const char*, 8> poiInterestExports =
         {
             kAscendantAltarInterestExport, kDynamicTeleporterInterestExport, kFixedItemContainerInterestExport,
@@ -976,7 +1054,7 @@ namespace
             !g_getFixedDoorDescription || !g_fixedDoorUpdateTarget) return false;
         for (auto target : g_poiInterestTargets) if (!target) return false;
 
-        std::array<void*, 14> created{};
+        std::array<void*, 15> created{};
         size_t createdCount = 0;
         auto cleanup = [&]
         {
@@ -1014,6 +1092,12 @@ namespace
             if (MH_CreateHook(g_poiInterestTargets[index], reinterpret_cast<void*>(poiDetours[index]),
                 reinterpret_cast<void**>(&g_originalPoiInterest[index])) != MH_OK) { cleanup(); return false; }
             created[createdCount++] = g_poiInterestTargets[index];
+        }
+        if (g_staticShrineAppendTarget && (g_staticShrineIsCleansed || g_staticShrineIsActiveForMainPlayer))
+        {
+            if (MH_CreateHook(g_staticShrineAppendTarget, &HookedStaticShrineAppend,
+                reinterpret_cast<void**>(&g_originalStaticShrineAppend)) != MH_OK) { cleanup(); return false; }
+            created[createdCount++] = g_staticShrineAppendTarget;
         }
         for (size_t index = 0; index < createdCount; ++index)
         {
@@ -1085,6 +1169,20 @@ namespace
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
+    bool ReadRestoredShrines(void* player, char* response, size_t size)
+    {
+        __try
+        {
+            const auto game = g_gameEngine ? *g_gameEngine : nullptr;
+            if (!game || !player || !g_getShrineUids || (MasteryAudit::loading && MasteryAudit::loading(game)))
+                return false;
+            const auto& vec = g_getShrineUids(player);
+            const int difficulty = g_getGameDifficulty ? static_cast<int>(g_getGameDifficulty(game)) : -1;
+            return RestoredShrines::FormatResponse(vec.begin, vec.end, response, size, difficulty);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
     void ExecuteRequest(void* manager, const std::shared_ptr<WorkRequest>& request)
     {
         if (!request) return;
@@ -1113,6 +1211,13 @@ namespace
             std::string snapshot;
             const bool ready = g_questTasksAvailable && ReadCurrentQuestTasks(snapshot);
             Complete(request, ready ? snapshot.c_str() : "OK QUEST_TASKS WAITING");
+            return;
+        }
+        if (request->kind == WorkKind::RestoredShrines)
+        {
+            char response[kResponseSize]{};
+            const bool ready = ReadRestoredShrines(GetPlayer(), response, sizeof(response));
+            Complete(request, ready ? response : "OK RESTORED_SHRINES WAITING");
             return;
         }
         if (request->kind == WorkKind::Bookmark)
@@ -1238,6 +1343,8 @@ namespace
         g_getRegionLoadFileName = Resolve<GetRegionLoadFileNameFunction>(engine, kGetRegionLoadFileNameExport);
         g_getResource = { Resolve<GetResourceFunction>(game, kGetMoneyExport), Resolve<GetResourceFunction>(game, kGetSkillPointsExport), Resolve<GetResourceFunction>(game, kGetModifierPointsExport), Resolve<GetResourceFunction>(game, kGetDevotionPointsExport) };
         g_hasToken = Resolve<HasTokenFunction>(game, kHasTokenExport);
+        g_getShrineUids = Resolve<GetShrineUidsFunction>(game, kGetShrineUidsExport);
+        g_getGameDifficulty = Resolve<GetResourceFunction>(game, kGetGameDifficultyExport);
         g_getQuestFileName = Resolve<GetQuestFileNameFunction>(game, kGetQuestFileNameExport);
         g_getNumTasks = Resolve<GetResourceFunction>(game, kGetNumTasksExport);
         g_getTaskByIndex = Resolve<GetTaskByIndexFunction>(game, kGetTaskByIndexExport);
@@ -1256,6 +1363,7 @@ namespace
             for (auto fn : g_getResource) resources = resources && fn != nullptr;
             if (resources) g_capabilities.fetch_or(1);
             if (g_hasToken) g_capabilities.fetch_or(2);
+            if (g_getShrineUids) g_capabilities.fetch_or(256);
         }
         g_capabilities.fetch_or(4);
         const bool navigation = InstallNavigationHooks(game);
@@ -1296,10 +1404,11 @@ namespace
         if (strcmp(line, "PING") == 0)
         {
             if (!g_ready) { char value[64]{}; sprintf_s(value, "ERROR INIT %lu", g_error.load()); Reply(pipe, value); return; }
-            char capabilities[512] = "PONG 38 READY CAPS=LUA_SYNC,UNLOAD";
+            char capabilities[512] = "PONG 39 READY CAPS=LUA_SYNC,UNLOAD";
             if (ItemAffixes::available) strcat_s(capabilities, ",ITEM_AFFIXES");
             if ((g_capabilities.load() & 1) != 0) strcat_s(capabilities, ",RESOURCES");
             if ((g_capabilities.load() & 2) != 0) strcat_s(capabilities, ",TOKENS");
+            if ((g_capabilities.load() & 256) != 0) strcat_s(capabilities, ",RESTORED_SHRINES");
             if ((g_capabilities.load() & 8) != 0) strcat_s(capabilities, ",NAVIGATION");
             if ((g_capabilities.load() & 16) != 0) strcat_s(capabilities, ",POSITION");
             if ((g_capabilities.load() & 32) != 0) strcat_s(capabilities, ",QUESTS");
@@ -1308,7 +1417,7 @@ namespace
             if ((g_capabilities.load() & 128) != 0) strcat_s(capabilities, ",REGION");
             if (MinimapTelemetry::available) strcat_s(capabilities, ",MINIMAP");
             if (MinimapProjection::available) strcat_s(capabilities, ",MINIMAP_PROJECTION");
-            if (RadarCanvas::available) strcat_s(capabilities, ",RADAR_CANVAS");
+            if (RadarCanvas::available) strcat_s(capabilities, ",RADAR_CANVAS,RADAR_CANVAS_TRAVEL");
             if (g_questTasksAvailable) strcat_s(capabilities, ",QUEST_TASKS_LIVE");
             if (CharacterLevel::available) strcat_s(capabilities, ",CHARACTER_LEVEL");
             if (CharacterResource::available) strcat_s(capabilities, ",RESOURCE_SET,LOADED_PROGRESSION,RESOURCE_CAP_BYPASS");
@@ -1480,6 +1589,12 @@ namespace
         {
             if (!g_questTasksAvailable) { Reply(pipe, "ERROR QUEST_TASKS_UNAVAILABLE"); return; }
             auto request = std::make_shared<WorkRequest>(); request->kind = WorkKind::QuestTasks;
+            SubmitAndWait(pipe, request); return;
+        }
+        if (strcmp(line, "SHRINE\tRESTORED") == 0)
+        {
+            if ((g_capabilities.load() & 256) == 0) { Reply(pipe, "ERROR RESTORED_SHRINES_UNAVAILABLE"); return; }
+            auto request = std::make_shared<WorkRequest>(); request->kind = WorkKind::RestoredShrines;
             SubmitAndWait(pipe, request); return;
         }
         if (strcmp(line, "QUEST\tACTIVE") == 0)
@@ -1748,7 +1863,7 @@ namespace
     }
 }
 
-extern "C" __declspec(dllexport) unsigned int GrimDawnCompanionBridgeVersion() { return 38; }
+extern "C" __declspec(dllexport) unsigned int GrimDawnCompanionBridgeVersion() { return 39; }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {

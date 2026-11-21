@@ -26,9 +26,11 @@ int main()
         !state.Command("ADD\t1,2,0,41\t3,4,0,42", 301) && !state.Command("COMMIT", 302),
         "too many entries invalidate the whole pending transaction");
     Marker marker;
-    for (const auto invalid : {"nan,2,0,41", "1,inf,0,41", "1000001,2,0,41", "1,2,7,41",
+    for (const auto invalid : {"nan,2,0,41", "1,inf,0,41", "1000001,2,0,41", "1,2,8,41",
         "1,2,0,00", "1,2,0,09", "1,2,0,7F", "1,2,0,GG", "1,2,0,4", "1,2,0,"})
         Check(!ParseMarker(invalid, marker), "radar rejects malformed coordinates, kinds and labels");
+    Check(ParseMarker("-1.25,2.5,7,426F6174", marker) && marker.kind == 7,
+        "radar wire accepts distinct travel utility kind");
     Check(ParseMarker("-1.25,2.5,6,E28886", marker) && marker.label.size() == 3,
         "radar wire supports invariant decimals and UTF-8 labels");
     std::array<float, 8> transform{100,200,0,0,.05f,0,0,.05f};
