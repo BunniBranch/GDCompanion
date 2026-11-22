@@ -56,27 +56,37 @@ public static class QuestNavigationIndex
         foreach (var script in scripts)
             foreach (var (function, links) in ReadScriptSpawns(script)) functions[function] = links;
         var result = new Dictionary<string, Target[]>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var targets = new List<Target>();
         foreach (var key in normalized.Keys)
         {
-            var targets = Visit(key, [], [], new HashSet<string>(StringComparer.OrdinalIgnoreCase), 0).Distinct().ToArray();
-            if (targets.Length > 0) result[key] = targets;
+            visited.Clear();
+            targets.Clear();
+            Visit(key, [], [], 0);
+            if (targets.Count > 0) result[key] = targets.Distinct().ToArray();
         }
         return result;
 
-        IEnumerable<Target> Visit(string key, string[] required, string[] excluded, HashSet<string> visited, int depth)
+        void Visit(string key, string[] required, string[] excluded, int depth)
         {
-            if (depth > 12 || !visited.Add(key) || !normalized.TryGetValue(key, out var record)) yield break;
-            if (record.Targets.Length > 0) yield return new(record.RecordPath, record.DisplayName, record.Targets, required, excluded);
-            var links = record.Children.Select(child => new QuestSpawnLink(child, [], []));
-            if (record.OnAddToWorld is not null && functions.TryGetValue(record.OnAddToWorld, out var scripted))
-                links = links.Concat(scripted);
-            foreach (var link in links)
+            if (depth > 12 || !normalized.TryGetValue(key, out var record) || !visited.Add(key)) return;
+            try
             {
-                var nextRequired = required.Concat(link.RequiredTokens).Distinct(StringComparer.Ordinal).ToArray();
-                var nextExcluded = excluded.Concat(link.ExcludedTokens).Distinct(StringComparer.Ordinal).ToArray();
-                if (nextRequired.Intersect(nextExcluded, StringComparer.Ordinal).Any()) continue;
-                foreach (var target in Visit(link.RecordPath, nextRequired, nextExcluded, new(visited, StringComparer.OrdinalIgnoreCase), depth + 1))
-                    yield return target;
+                if (record.Targets.Length > 0) targets.Add(new(record.RecordPath, record.DisplayName, record.Targets, required, excluded));
+                var links = record.Children.Select(child => new QuestSpawnLink(child, [], []));
+                if (record.OnAddToWorld is not null && functions.TryGetValue(record.OnAddToWorld, out var scripted))
+                    links = links.Concat(scripted);
+                foreach (var link in links)
+                {
+                    var nextRequired = required.Concat(link.RequiredTokens).Distinct(StringComparer.Ordinal).ToArray();
+                    var nextExcluded = excluded.Concat(link.ExcludedTokens).Distinct(StringComparer.Ordinal).ToArray();
+                    if (nextRequired.Intersect(nextExcluded, StringComparer.Ordinal).Any()) continue;
+                    Visit(link.RecordPath, nextRequired, nextExcluded, depth + 1);
+                }
+            }
+            finally
+            {
+                visited.Remove(key);
             }
         }
     }
