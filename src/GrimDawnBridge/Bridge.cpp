@@ -1059,10 +1059,7 @@ namespace
         auto cleanup = [&]
         {
             for (size_t index = 0; index < createdCount; ++index)
-            {
-                MH_DisableHook(created[index]);
                 MH_RemoveHook(created[index]);
-            }
         };
         if (MH_CreateHook(g_getDetailMapDataTarget, &HookedGetDetailMapData,
             reinterpret_cast<void**>(&g_originalGetDetailMapData)) != MH_OK) return false;
@@ -1101,7 +1098,7 @@ namespace
         }
         for (size_t index = 0; index < createdCount; ++index)
         {
-            if (MH_EnableHook(created[index]) != MH_OK) { cleanup(); return false; }
+            if (MH_QueueEnableHook(created[index]) != MH_OK) { cleanup(); return false; }
         }
         return true;
     }
@@ -1849,17 +1846,45 @@ namespace
         else
         {
             auto update = reinterpret_cast<void*>(GetProcAddress(engine, kUpdateExport));
-            g_updateTarget = update;
             g_runCode = Resolve<RunCodeFunction>(engine, kRunCodeExport);
             if (!update || !g_runCode) g_error = 2;
             else if (MH_Initialize() != MH_OK) g_error = 3;
-            else if (MH_CreateHook(update, &HookedUpdate, reinterpret_cast<void**>(&g_originalUpdate)) != MH_OK) g_error = 4;
-            else if (MH_EnableHook(update) != MH_OK) g_error = 5;
-            else { ResolveGameApi(engine, game); MinimapTelemetry::Initialize(engine); RadarCanvas::Initialize(engine); MasteryAudit::Initialize(engine, game); MasteryRespec::Initialize(engine, game); CharacterResource::Initialize(engine,game); ItemAffixes::Initialize(engine,game); CharacterLevel::Initialize(game); CharacterLevel::budgetCheck=&CharacterResource::CheckLevel; CharacterLevel::available=CharacterLevel::available && CharacterResource::available; GameplayAssists::Initialize(game, &GetPlayer, g_gameEngine); PersistentBookmarks::Initialize(engine, game); g_ready = true; }
+            else if (MH_CreateHook(update, &HookedUpdate, reinterpret_cast<void**>(&g_originalUpdate)) != MH_OK) { g_error = 4; MH_Uninitialize(); }
+            else if (MH_QueueEnableHook(update) != MH_OK) { g_error = 5; MH_RemoveHook(update); MH_Uninitialize(); }
+            else
+            {
+                ResolveGameApi(engine, game);
+                MinimapTelemetry::Initialize(engine);
+                RadarCanvas::Initialize(engine);
+                MasteryAudit::Initialize(engine, game);
+                MasteryRespec::Initialize(engine, game);
+                CharacterResource::Initialize(engine, game);
+                ItemAffixes::Initialize(engine, game);
+                CharacterLevel::Initialize(game);
+                CharacterLevel::budgetCheck = &CharacterResource::CheckLevel;
+                CharacterLevel::available = CharacterLevel::available && CharacterResource::available;
+                GameplayAssists::Initialize(game, &GetPlayer, g_gameEngine);
+                PersistentBookmarks::Initialize(engine, game);
+                if (MH_ApplyQueued() != MH_OK)
+                {
+                    g_error = 5;
+                    g_capabilities = 0;
+                    MinimapTelemetry::available = false;
+                    MinimapProjection::available = false;
+                    RadarCanvas::available = false;
+                    GameplayAssists::available = false;
+                    MH_DisableHook(MH_ALL_HOOKS);
+                    MH_RemoveHook(MH_ALL_HOOKS);
+                    MH_Uninitialize();
+                }
+                else
+                {
+                    g_updateTarget = update;
+                    g_ready = true;
+                }
+            }
         }
-        HANDLE thread = CreateThread(nullptr, 0, PipeThread, nullptr, 0, nullptr);
-        if (thread) CloseHandle(thread);
-        return g_error.load();
+        return PipeThread(nullptr);
     }
 }
 

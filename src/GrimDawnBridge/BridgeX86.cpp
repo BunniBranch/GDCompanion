@@ -244,9 +244,7 @@ namespace
                 else { g_hookEnabled = true; g_ready = true; }
             }
         }
-        HANDLE thread = CreateThread(nullptr, 0, PipeThread, nullptr, 0, nullptr);
-        if (thread) CloseHandle(thread);
-        return g_error.load();
+        return PipeThread(nullptr);
     }
 }
 

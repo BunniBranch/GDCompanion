@@ -204,11 +204,11 @@ namespace GameplayAssists
         unsigned created = 0;
         for (; created < 4; ++created)
             if (MH_CreateHook(targets[created], hooks[created].replacement, hooks[created].original) != MH_OK) break;
-        bool enabled = created == 4;
-        if (enabled) for (auto target : targets) if (MH_EnableHook(target) != MH_OK) { enabled = false; break; }
-        if (!enabled)
+        bool queued = created == 4;
+        if (queued) for (auto target : targets) if (MH_QueueEnableHook(target) != MH_OK) { queued = false; break; }
+        if (!queued)
         {
-            for (unsigned i = 0; i < created; ++i) { MH_DisableHook(targets[i]); MH_RemoveHook(targets[i]); }
+            for (unsigned i = 0; i < created; ++i) MH_RemoveHook(targets[i]);
             return;
         }
         available = true;

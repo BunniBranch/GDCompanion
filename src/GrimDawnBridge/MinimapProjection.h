@@ -81,7 +81,7 @@ namespace MinimapProjection
         if (!supported) return;
         auto target = executable + renderRva;
         if (MH_CreateHook(target, reinterpret_cast<void*>(&RenderHook), reinterpret_cast<void**>(&originalRender)) != MH_OK) return;
-        if (MH_EnableHook(target) == MH_OK) available = true;
+        if (MH_QueueEnableHook(target) == MH_OK) available = true;
         else MH_RemoveHook(target);
     }
 

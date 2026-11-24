@@ -149,11 +149,11 @@ namespace MinimapTelemetry
         for (; count < 3; ++count) if (MH_CreateHook(targets[count], detours[count], originals[count]) != MH_OK) break;
         if (count == 3)
         {
-            bool enabled = true;
-            for (size_t index = 0; index < 3; ++index) if (MH_EnableHook(targets[index]) != MH_OK) enabled = false;
-            if (enabled) { available = true; MinimapProjection::onRendered = &ObserveMap; MinimapProjection::Initialize(engine); return true; }
+            bool queued = true;
+            for (size_t index = 0; index < 3; ++index) if (MH_QueueEnableHook(targets[index]) != MH_OK) queued = false;
+            if (queued) { available = true; MinimapProjection::onRendered = &ObserveMap; MinimapProjection::Initialize(engine); return true; }
         }
-        for (size_t index = 0; index < count; ++index) { MH_DisableHook(targets[index]); MH_RemoveHook(targets[index]); }
+        for (size_t index = 0; index < count; ++index) MH_RemoveHook(targets[index]);
         return false;
     }
     inline bool Read(std::array<float, 6>& result)

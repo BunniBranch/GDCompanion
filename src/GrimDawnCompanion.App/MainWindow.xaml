@@ -518,6 +518,13 @@
           </Border>
           <Border Style="{StaticResource Card}" MaxWidth="850" HorizontalAlignment="Left" Margin="0,16,0,0">
             <StackPanel>
+              <TextBlock Text="In-Game Radar" FontSize="19" FontWeight="SemiBold"/>
+              <TextBlock Text="Automatically enable the in-game radar when connecting to Grim Dawn, provided the navigation catalog is ready and at least one marker type is selected." Foreground="{StaticResource SecondaryText}" Margin="0,7,0,14" TextWrapping="Wrap"/>
+              <CheckBox x:Name="AutoEnableRadarBox" Content="Automatically Enable In-Game Radar When Connecting" IsChecked="False" Foreground="{StaticResource PrimaryText}" Checked="AutoEnableRadarChanged" Unchecked="AutoEnableRadarChanged"/>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource Card}" MaxWidth="850" HorizontalAlignment="Left" Margin="0,16,0,0">
+            <StackPanel>
               <TextBlock Text="Bridge Lifecycle" FontSize="19" FontWeight="SemiBold"/>
               <TextBlock Text="Companion can remove its update-thread hook and unload the bridge when closing, allowing the companion to reconnect without restarting Grim Dawn when unloading succeeds." Foreground="{StaticResource SecondaryText}" Margin="0,7,0,14" TextWrapping="Wrap"/>
               <CheckBox x:Name="AutoUnbridgeBox" Content="Automatically Unload Bridge When Closing" IsChecked="True" Foreground="{StaticResource PrimaryText}" Checked="AutoUnbridgeChanged" Unchecked="AutoUnbridgeChanged"/>

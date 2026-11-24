@@ -48,6 +48,28 @@ Require(refreshHandler.Contains("if (_viewModel.IsBusy || _refreshDataBusy) retu
         refreshHandler.Split("finally", 2)[1].Contains("ForceRefreshDataButton.IsEnabled = true;", StringComparison.Ordinal) &&
         mainWindowSource.Contains("finally { _viewModel.IsBusy = wasBusy; }", StringComparison.Ordinal),
     "force refresh prevents duplicate runs and restores controls after completion or failure");
+var autoEnableRadarBox = mainWindowMarkup.Descendants(presentation + "CheckBox")
+    .Single(box => (string?)box.Attribute(xaml + "Name") == "AutoEnableRadarBox");
+Require(autoEnableRadarBox.Ancestors().Contains(settingsPage) &&
+        (string?)autoEnableRadarBox.Attribute("Checked") == "AutoEnableRadarChanged" &&
+        (string?)autoEnableRadarBox.Attribute("Unchecked") == "AutoEnableRadarChanged" &&
+        mainWindowSource.Contains("public bool AutoEnableRadarOnConnect { get; set; }", StringComparison.Ordinal) &&
+        mainWindowSource.Contains("AutoEnableRadarBox.IsChecked = _settings.AutoEnableRadarOnConnect;", StringComparison.Ordinal) &&
+        mainWindowSource.Contains("if (_settings.AutoEnableRadarOnConnect)", StringComparison.Ordinal) &&
+        mainWindowSource.Contains("await TryEnableNavigationOverlayAsync(showValidationDialogs: false);", StringComparison.Ordinal) &&
+        mainWindowSource.Contains("var available = _bridge.IsConnected && _bridge.SupportsNativeRadar;", StringComparison.Ordinal) &&
+        mainWindowSource.Contains("var catalog = await EnsureNavigationCatalogAsync();", StringComparison.Ordinal),
+    "Settings exposes AutoEnableRadarBox, radar availability only checks real blockers, and enabling waits for map indexing");
+Require(GameBridgeClient.IsWaitingForWorldError("ERROR NO_LOCAL_PLAYER") &&
+        GameBridgeClient.IsWaitingForWorldError("ERROR INVALID_PLAYER_POSITION") &&
+        GameBridgeClient.IsWaitingForWorldError("ERROR NO_PLAYER_REGION") &&
+        GameBridgeClient.IsWaitingForWorldError("ERROR INVALID_PLAYER_REGION") &&
+        !GameBridgeClient.IsWaitingForWorldError("ERROR POSITION_UNAVAILABLE") &&
+        !GameBridgeClient.IsWaitingForWorldError(null) &&
+        mainWindowSource.Contains("catch (InvalidOperationException ex) when (GameBridgeClient.IsWaitingForWorldError(ex.Message))", StringComparison.Ordinal) &&
+        mainWindowSource.Contains("_navigationTimer.Interval = WaitingNavigationPollInterval;", StringComparison.Ordinal) &&
+        mainWindowSource.Contains("_navigationTimer.Interval = ActiveNavigationPollInterval;", StringComparison.Ordinal),
+    "in-game radar stays armed across main-menu transitions with adaptive poll backoff and session-state reset");
 Require(mainWindowMarkup.Descendants(presentation + "TextBlock").Single(text =>
         (string?)text.Attribute(xaml + "Name") == "SidebarVersionText").Attribute("Text")?.Value == "{x:Static local:AppVersion.Display}" &&
         !mainWindowMarkup.ToString().Contains("Local • Single-Player", StringComparison.Ordinal),

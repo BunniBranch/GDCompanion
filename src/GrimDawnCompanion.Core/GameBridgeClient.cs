@@ -35,26 +35,62 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
     {
         ValidateNativeApiBindings();
         if (!File.Exists(bridgeDllPath)) throw new FileNotFoundException("The native game bridge is missing.", bridgeDllPath);
-        var processes = Process.GetProcessesByName("Grim Dawn");
-        var process = processes.FirstOrDefault(p =>
-        {
-            try { return string.Equals(Path.GetFullPath(p.MainModule!.FileName), Path.GetFullPath(game.ExecutablePath), StringComparison.OrdinalIgnoreCase); }
-            catch { return false; }
-        }) ?? throw new InvalidOperationException($"Grim Dawn {game.ArchitectureName} is not running from the configured game directory.");
-        ProcessId = process.Id;
+        var processId = FindGameProcessId(game);
+        ProcessId = processId;
 
-        if (!await TryOpenPipeAsync(process.Id, 250, cancellationToken))
+        if (!TryOpenPipeInstant(processId))
         {
-            await Task.Run(() => Inject(process, Path.GetFullPath(bridgeDllPath)), cancellationToken);
-            var deadline = DateTime.UtcNow.AddSeconds(12);
-            while (DateTime.UtcNow < deadline && !await TryOpenPipeAsync(process.Id, 500, cancellationToken))
-                await Task.Delay(200, cancellationToken);
+            var fullDllPath = Path.GetFullPath(bridgeDllPath);
+            await Task.Run(() => Inject(processId, fullDllPath), cancellationToken);
+            await WaitForPipeAsync(processId, TimeSpan.FromSeconds(12), cancellationToken);
         }
         if (!IsConnected) throw new InvalidOperationException("The bridge loaded, but its command channel did not become ready.");
         var response = await SendAsync("PING", cancellationToken);
         if (!response.StartsWith("PONG", StringComparison.Ordinal)) throw new InvalidOperationException("The game bridge returned an unexpected handshake.");
         ParseHandshake(response);
         return response;
+    }
+
+    private static int FindGameProcessId(GameInstallation game)
+    {
+        var expectedExecutable = Path.GetFullPath(game.ExecutablePath);
+        var processes = Process.GetProcessesByName("Grim Dawn");
+        try
+        {
+            foreach (var process in processes)
+            {
+                if (TryGetProcessImagePath(process.Id, out var imagePath) &&
+                    string.Equals(imagePath, expectedExecutable, StringComparison.OrdinalIgnoreCase))
+                    return process.Id;
+            }
+        }
+        finally
+        {
+            foreach (var process in processes) process.Dispose();
+        }
+        throw new InvalidOperationException($"Grim Dawn {game.ArchitectureName} is not running from the configured game directory.");
+    }
+
+    private static unsafe bool TryGetProcessImagePath(int processId, out string? path)
+    {
+        path = null;
+        var handle = OpenProcess(0x1000, false, (uint)processId);
+        if (handle == 0) return false;
+        try
+        {
+            Span<char> buffer = stackalloc char[1024];
+            var length = (uint)buffer.Length;
+            fixed (char* pointer = buffer)
+            {
+                if (!QueryFullProcessImageNameW(handle, 0, pointer, ref length) || length == 0) return false;
+            }
+            path = Path.GetFullPath(new string(buffer[..(int)length]));
+            return true;
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
     }
 
     private void ParseHandshake(string response)
@@ -239,6 +275,12 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
         return MinimapProjection.ParseFrame(await SendAsync(SupportsNativeRadar ? "MINIMAP\tFRAME2" : "MINIMAP\tFRAME", cancellationToken));
     }
 
+    public static bool IsWaitingForWorldError(string? message) => message is
+        "ERROR NO_LOCAL_PLAYER" or
+        "ERROR INVALID_PLAYER_POSITION" or
+        "ERROR NO_PLAYER_REGION" or
+        "ERROR INVALID_PLAYER_REGION";
+
     public async Task<WorldPosition> GetPlayerPositionAsync(CancellationToken cancellationToken = default)
     {
         EnsureCapability("POSITION");
@@ -410,23 +452,40 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
         return token;
     }
 
-    private async Task<bool> TryOpenPipeAsync(int processId, int timeoutMilliseconds, CancellationToken cancellationToken)
+    private bool TryOpenPipeInstant(int processId)
     {
         if (IsConnected) return true;
-        await DisposePipeAsync();
+        AbortPipe();
         var pipe = new NamedPipeClientStream(".", $"GrimDawnCompanion.{processId}", PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(timeoutMilliseconds);
-            await pipe.ConnectAsync(timeout.Token);
+            pipe.Connect(0);
             _pipe = pipe;
             _reader = new StreamReader(pipe, new UTF8Encoding(false), false, 4096, true);
             _writer = new StreamWriter(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true, NewLine = "\n" };
             return true;
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { pipe.Dispose(); return false; }
+        catch (TimeoutException) { pipe.Dispose(); return false; }
         catch (IOException) { pipe.Dispose(); return false; }
+    }
+
+    private async Task WaitForPipeAsync(int processId, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (!TryOpenPipeInstant(processId))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = timeout - elapsed.Elapsed;
+            if (remaining <= TimeSpan.Zero) return;
+            var delayMs = elapsed.ElapsedMilliseconds switch
+            {
+                < 100 => 5,
+                < 500 => 15,
+                _ => 50
+            };
+            var delay = TimeSpan.FromMilliseconds(Math.Min(delayMs, remaining.TotalMilliseconds));
+            await Task.Delay(delay, cancellationToken);
+        }
     }
 
     private async Task<string> SendAsync(string command, CancellationToken cancellationToken)
@@ -445,9 +504,9 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
         finally { _sendLock.Release(); }
     }
 
-    private static void Inject(Process process, string dllPath)
+    private static void Inject(int processId, string dllPath)
     {
-        var processHandle = OpenProcess(0x0002 | 0x0008 | 0x0020 | 0x0400, false, (uint)process.Id);
+        var processHandle = OpenProcess(0x0002 | 0x0008 | 0x0020 | 0x0400, false, (uint)processId);
         if (processHandle == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Grim Dawn process.");
         try
         {
@@ -472,12 +531,6 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
             finally { VirtualFreeEx(processHandle, remote, 0, 0x8000); }
         }
         finally { CloseHandle(processHandle); }
-    }
-
-    private Task DisposePipeAsync()
-    {
-        AbortPipe();
-        return Task.CompletedTask;
     }
 
     private void AbortPipe()
@@ -522,4 +575,5 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
     [LibraryImport("kernel32.dll")] private static partial uint WaitForSingleObject(nint handle, uint milliseconds);
     [LibraryImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static partial bool GetExitCodeThread(nint thread, out uint exitCode);
     [LibraryImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static partial bool CloseHandle(nint handle);
+    [LibraryImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static unsafe partial bool QueryFullProcessImageNameW(nint process, uint flags, char* exeName, ref uint size);
 }
