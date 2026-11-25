@@ -33,6 +33,7 @@ src/GrimDawnBridge/MasteryAudit.h
 src/GrimDawnBridge/MasteryGameUi.h
 src/GrimDawnBridge/MasteryRespec.h
 src/GrimDawnBridge/MasteryRespecTests.cpp
+src/GrimDawnBridge/MapProbe.h
 src/GrimDawnBridge/MinimapProjection.h
 src/GrimDawnBridge/MinimapTelemetry.h
 src/GrimDawnBridge/PersistentBookmarkTests.cpp

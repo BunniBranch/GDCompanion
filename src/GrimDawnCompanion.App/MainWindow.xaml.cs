@@ -38,6 +38,9 @@ public partial class MainWindow : Window
     private bool _questStageDataReady;
     private ulong _nativeRadarContext;
     private bool _nativeRadarSubmitted;
+    private ulong _nativeMapContext;
+    private bool _nativeMapSubmitted;
+    private NativeMapFrame? _mapFrame;
     private IReadOnlyList<LiveMapMarkerRecord> _liveMapMarkers = [];
     private IReadOnlyList<LiveMapMarkerRecord> _regionalQuestMarkers = [];
     private IReadOnlySet<string> _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -688,6 +691,7 @@ public partial class MainWindow : Window
         _settings.EnabledPoiTypes = PoiTypesPanel.Children.OfType<CheckBox>()
             .Where(box => box.IsChecked == true).Aggregate(PoiFilter.None, (mask, box) => mask | Enum.Parse<PoiFilter>((string)box.Tag));
         _nativeRadarSubmitted = false;
+        _nativeMapSubmitted = false;
         try { await _settings.SaveAsync(); }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Could not save navigation filters", MessageBoxButton.OK, MessageBoxImage.Warning); }
 
@@ -745,6 +749,9 @@ public partial class MainWindow : Window
         _navigationPollCount = 0;
         _nativeRadarContext = 0;
         _nativeRadarSubmitted = false;
+        _nativeMapContext = 0;
+        _nativeMapSubmitted = false;
+        _mapFrame = null;
         _questNavigationState = new();
         _questStageDataReady = false;
         _activeQuestPaths = [];
@@ -852,52 +859,91 @@ public partial class MainWindow : Window
                 _regionalQuestMarkers = _questMarkerCache.Update(region, _activeQuestPaths, _liveMapMarkers, player,
                     Math.Max(120, NavigationCatalogRange * 1.75));
             }
-            // Fetch the coherent render frame last, after slower quest/catalog queries.
+            // Fetch the coherent render frames last, after slower quest/catalog queries.
             _minimapGeometry = await _bridge.GetMinimapFrameAsync(_lifetime.Token);
+            _mapFrame = await _bridge.GetMapFrameAsync(_lifetime.Token);
             var liveMarkers = _liveMapMarkers.Where(marker => marker.Type != 21)
                 .Concat(_regionalQuestMarkers)
                 .Select(ToOverlayMarker);
-            if (_minimapGeometry?.Projection is null || _minimapGeometry.RenderContext == 0)
+            var minimapReady = _minimapGeometry?.Projection is not null && _minimapGeometry.RenderContext != 0;
+            var mapReady = _mapFrame is not null;
+            if (!minimapReady && !mapReady)
             {
                 if (_nativeRadarSubmitted) await _bridge.ClearNativeRadarAsync(_lifetime.Token);
+                if (_nativeMapSubmitted) await _bridge.ClearNativeMapAsync(_lifetime.Token);
                 _nativeRadarSubmitted = false;
+                _nativeMapSubmitted = false;
                 _openedChestTokens.Clear();
-                NavigationAlignmentStatusText.Text = "Waiting for a supported visible minimap; in-game radar hidden.";
-                _viewModel.NavigationStatusText = "Radar enabled — waiting for the game's minimap.";
+                NavigationAlignmentStatusText.Text = "Waiting for a supported minimap or the full map; in-game radar hidden.";
+                _viewModel.NavigationStatusText = "Radar enabled — waiting for the game's minimap or map.";
                 return;
             }
-            if (_nativeRadarContext != 0 && _nativeRadarContext != _minimapGeometry.RenderContext)
+            if (minimapReady && _nativeRadarContext != 0 && _nativeRadarContext != _minimapGeometry!.RenderContext)
             {
                 await _bridge.ClearNativeRadarAsync(_lifetime.Token);
                 _nativeRadarContext = _minimapGeometry.RenderContext;
                 _nativeRadarSubmitted = false;
                 _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        _openedChestTokens.Clear();
-        _gameDifficulty = null;
+                _openedChestTokens.Clear();
+                _gameDifficulty = null;
                 _navigationPollCount = 0; // Refresh map/quest selection before using the new render context.
                 return;
             }
-            _nativeRadarContext = _minimapGeometry.RenderContext;
-            if (!_nativeRadarSubmitted || _navigationPollCount % 3 == 1)
+            if (mapReady && _nativeMapContext != 0 && _nativeMapContext != _mapFrame!.RenderContext)
             {
+                await _bridge.ClearNativeMapAsync(_lifetime.Token);
+                _nativeMapContext = _mapFrame.RenderContext;
+                _nativeMapSubmitted = false;
+            }
+            if (minimapReady) _nativeRadarContext = _minimapGeometry!.RenderContext;
+            if (mapReady) _nativeMapContext = _mapFrame!.RenderContext;
+            if (minimapReady != _nativeRadarSubmitted || mapReady != _nativeMapSubmitted || _navigationPollCount % 3 == 1)
+            {
+                // One selection feeds both surfaces. Each lane projects it for its
+                // own surface: the minimap clamps to its rim, the map hides off-edge.
                 var selected = NavigationOverlayProjection.Build(player, _navigationCatalog.Markers.Concat(liveMarkers), _activeQuestPaths,
                     NavigationQuestBox.IsChecked == true, NavigationPoiBox.IsChecked == true, NavigationCatalogRange,
-                    _currentLevelPath, _minimapGeometry.Projection, _questNavigationState, _settings.EnabledPoiTypes,
-                    _restoredShrineUids, _gameDifficulty, _openedChestTokens);
-                await _bridge.SetNativeRadarFrameAsync(_nativeRadarContext, selected, _lifetime.Token);
-                _nativeRadarSubmitted = true;
+                    _currentLevelPath, minimapReady ? _minimapGeometry!.Projection : null, _questNavigationState,
+                    _settings.EnabledPoiTypes, _restoredShrineUids, _gameDifficulty, _openedChestTokens);
+                if (minimapReady)
+                {
+                    await _bridge.SetNativeRadarFrameAsync(_nativeRadarContext, selected, _lifetime.Token);
+                    _nativeRadarSubmitted = true;
+                }
+                else if (_nativeRadarSubmitted)
+                {
+                    await _bridge.ClearNativeRadarAsync(_lifetime.Token);
+                    _nativeRadarSubmitted = false;
+                }
+                if (mapReady)
+                {
+                    await _bridge.SetNativeMapFrameAsync(_nativeMapContext, selected, _lifetime.Token);
+                    _nativeMapSubmitted = true;
+                }
+                else if (_nativeMapSubmitted)
+                {
+                    await _bridge.ClearNativeMapAsync(_lifetime.Token);
+                    _nativeMapSubmitted = false;
+                }
             }
-            NavigationAlignmentStatusText.Text = $"In-game rendering • minimap {_minimapGeometry.Width:0} px • fullscreen and windowed modes";
+            NavigationAlignmentStatusText.Text = minimapReady
+                ? $"In-game rendering • minimap {_minimapGeometry!.Width:0} px • fullscreen and windowed modes"
+                : "In-game rendering • full map • fullscreen and windowed modes";
             if (_navigationPollCount % 15 == 1)
             {
                 var native = await _bridge.GetNativeRadarStatusAsync(_lifetime.Token);
-                _viewModel.NavigationStatusText = native.Rendering
-                    ? $"Active — {native.Drawn} markers rendered inside Grim Dawn."
-                    : "Radar enabled — waiting for a foreground game render.";
+                var mapNative = _bridge.SupportsNativeMap ? await _bridge.GetNativeMapStatusAsync(_lifetime.Token) : null;
+                _viewModel.NavigationStatusText = mapNative?.Rendering == true
+                    ? $"Active — {mapNative.Drawn} markers rendered on the full map."
+                    : native.Rendering
+                        ? $"Active — {native.Drawn} markers rendered inside Grim Dawn."
+                        : "Radar enabled — waiting for a foreground game render.";
                 if (NavigationQuestBox.IsChecked == true && !_bridge.SupportsLiveQuestTasks)
                     _viewModel.NavigationStatusText += " Restart Grim Dawn and reconnect for reliable long-range quest stages.";
                 else if (NavigationQuestBox.IsChecked == true && !_questStageDataReady)
                     _viewModel.NavigationStatusText += " Waiting for tracked quest stages; nearby stars only.";
+                if (_bridge.SupportsNativeRadar && !_bridge.SupportsNativeMap)
+                    _viewModel.NavigationStatusText += " Full-map markers need the updated bridge; restart Grim Dawn and reconnect.";
             }
         }
         catch (OperationCanceledException) { }
@@ -929,6 +975,10 @@ public partial class MainWindow : Window
         if (_bridge.IsConnected && _bridge.SupportsNativeRadar)
         {
             try { await _bridge.ClearNativeRadarAsync(_lifetime.Token); } catch { }
+        }
+        if (_bridge.IsConnected && _bridge.SupportsNativeMap)
+        {
+            try { await _bridge.ClearNativeMapAsync(_lifetime.Token); } catch { }
         }
         ResetNavigationSessionState();
         NavigationQuestDiagnosticsText.Text = "";

@@ -88,6 +88,17 @@ internal static class NativeRadarFrameRegressionTests
             !NativeRadarStatus.Parse("OK RADAR_CANVAS 12 500").Rendering,
             "native status reports actual recent drawing rather than queued targets");
         Reject(() => NativeRadarStatus.Parse("OK RADAR_CANVAS 113 10"));
+        var mapCommands = NativeRadarFrame.Commands(9, [point], lane: "MAP");
+        require(mapCommands.First() == "MAP\tCANVAS\tBEGIN\t9\t1" && mapCommands.Last() == "MAP\tCANVAS\tCOMMIT" &&
+            mapCommands.Skip(1).SkipLast(1).All(command => command.StartsWith("MAP\tCANVAS\tADD\t", StringComparison.Ordinal)),
+            "full map lane reuses the selected markers under its own command prefix");
+        require(NativeMapFrame.Parse("OK MAP_FRAME HIDDEN") is null &&
+            NativeMapFrame.Parse("OK MAP_FRAME OPEN 77") is { RenderContext: 77 },
+            "map frame parser distinguishes a hidden map from an open map render");
+        Reject(() => NativeMapFrame.Parse("OK MAP_FRAME OPEN 0"));
+        Reject(() => NativeMapFrame.Parse("OK MAP_FRAME 77"));
+        require(NativeRadarStatus.Parse("OK MAP_CANVAS 4 20", "MAP_CANVAS") is { Drawn: 4, Rendering: true },
+            "map status reports drawing on the full map lane");
         var client = new GameBridgeClient();
         try
         {
@@ -97,6 +108,13 @@ internal static class NativeRadarFrameRegressionTests
             require(client.SupportsNativeRadar, "verified native radar requires projection and canvas capabilities");
             typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.ProtocolVersion))!.SetValue(client, 30);
             require(!client.SupportsNativeRadar, "old bridge cannot activate native fullscreen rendering");
+            typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.ProtocolVersion))!.SetValue(client, 40);
+            require(!client.SupportsNativeMap, "map lane needs the map capability, not just the radar one");
+            typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.Capabilities))!.SetValue(client,
+                new HashSet<string> { "MINIMAP", "MINIMAP_PROJECTION", "RADAR_CANVAS", "MAP_CANVAS" });
+            require(client.SupportsNativeMap, "verified map lane requires the full-screen map capability");
+            typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.ProtocolVersion))!.SetValue(client, 39);
+            require(!client.SupportsNativeMap, "old bridge cannot draw on the full-screen map");
         }
         finally { client.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }

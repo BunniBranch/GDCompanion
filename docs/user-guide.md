@@ -39,6 +39,11 @@ The native renderer follows the minimap's position, size, zoom, and rotation
 and works in Fullscreen and windowed modes. Radar remains unavailable when the
 installed game build does not pass the native projection and canvas checks.
 
+The full map opened with M shows the same selected markers at their true world
+positions. Markers outside the visible map are hidden rather than pinned to an
+edge, and unexplored areas are not treated differently: if the catalog has a
+location, its marker is still shown. Hover labels work on both surfaces.
+
 Quest stars represent supported active tracked objectives. Distant bearings
 cover the current connected map region, not unrelated maps or dungeons.
 Possible spawn areas are not proof that an enemy is present; some custom-script

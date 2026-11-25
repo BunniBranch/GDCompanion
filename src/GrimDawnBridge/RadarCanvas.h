@@ -14,18 +14,35 @@ namespace RadarCanvas
     inline bool available = false;
     inline SRWLOCK stateLock = SRWLOCK_INIT;
     inline State state;
+    inline State mapState;
     inline std::atomic<unsigned long long> lastDraw{0};
     inline std::atomic<unsigned int> drawnCount{0};
+    inline std::atomic<unsigned long long> mapLastDraw{0};
+    inline std::atomic<unsigned int> mapDrawnCount{0};
+    inline std::atomic<unsigned long long> mapDrawCalls{0}, mapStaleRejects{0};
+    inline std::atomic<unsigned int> mapOffscreen{0};
+    inline constexpr float kOutline[]{ .03f, .067f, .114f, 1.f };
+    inline constexpr float kColors[][4]{ {1.f,.82f,.35f,1.f}, {.20f,.88f,.79f,1.f}, {.67f,.50f,1.f,1.f},
+        {.30f,.67f,1.f,1.f}, {1.f,.60f,.32f,1.f}, {.95f,.77f,.40f,1.f}, {.8f,.86f,.94f,1.f}, {.35f,.92f,.42f,1.f} };
+    static_assert(std::size(kColors) == MaxMarkerKind + 1);
 
     inline void Clear()
     {
-        AcquireSRWLockExclusive(&stateLock); state.Clear(); ReleaseSRWLockExclusive(&stateLock);
-        lastDraw = 0; drawnCount = 0;
+        AcquireSRWLockExclusive(&stateLock); state.Clear(); mapState.Clear(); ReleaseSRWLockExclusive(&stateLock);
+        lastDraw = 0; drawnCount = 0; mapLastDraw = 0; mapDrawnCount = 0;
+        mapDrawCalls = 0; mapStaleRejects = 0; mapOffscreen = 0;
     }
     inline bool Command(const char* command)
     {
         AcquireSRWLockExclusive(&stateLock);
         const bool accepted = state.Command(command, GetTickCount64());
+        ReleaseSRWLockExclusive(&stateLock);
+        return accepted;
+    }
+    inline bool MapCommand(const char* command)
+    {
+        AcquireSRWLockExclusive(&stateLock);
+        const bool accepted = mapState.Command(command, GetTickCount64());
         ReleaseSRWLockExclusive(&stateLock);
         return accepted;
     }
@@ -61,10 +78,6 @@ namespace RadarCanvas
         const float offsetY = *reinterpret_cast<const float*>(canvasBytes + MinimapTelemetry::canvasOffsetY);
         const float centerX = bounds[0] + bounds[2] * .5f, centerY = bounds[1] + bounds[3] * .5f;
         const float scale = std::clamp(bounds[2] / 230.f, .75f, 2.25f);
-        constexpr float outline[]{ .03f, .067f, .114f, 1.f };
-        constexpr float colors[][4]{ {1.f,.82f,.35f,1.f}, {.20f,.88f,.79f,1.f}, {.67f,.50f,1.f,1.f},
-            {.30f,.67f,1.f,1.f}, {1.f,.60f,.32f,1.f}, {.95f,.77f,.40f,1.f}, {.8f,.86f,.94f,1.f}, {.35f,.92f,.42f,1.f} };
-        static_assert(std::size(colors) == MaxMarkerKind + 1);
         POINT cursor{}; RECT client{};
         const bool haveCursor = GetCursorPos(&cursor) && ScreenToClient(window, &cursor) &&
             GetClientRect(window, &client) && client.right > 0 && client.bottom > 0;
@@ -82,8 +95,8 @@ namespace RadarCanvas
             const float radius = (star ? 6.5f : 4.f) * scale;
             // RenderTriFan consumes viewport pixel positions directly, unlike
             // RenderRect/Text, which add the canvas translation themselves.
-            Glyph(canvas, x, y, radius + scale, star, outline);
-            Glyph(canvas, x, y, radius, star, colors[marker.kind]);
+            Glyph(canvas, x, y, radius + scale, star, kOutline);
+            Glyph(canvas, x, y, radius, star, kColors[marker.kind]);
             ++count;
             const float distance = hypotf(mouseX - x, mouseY - y);
             if (distance < std::max(10.f, radius * 1.5f) && distance < nearest) { hovered = &marker; nearest = distance; }
@@ -99,7 +112,7 @@ namespace RadarCanvas
                 const float left = std::clamp(mouseX - width, 8.f, bounds[4] - width - 8.f);
                 const float top = std::clamp(mouseY + 18.f, 8.f, bounds[5] - 46.f);
                 const float box[]{left - offsetX, top - offsetY, width, 34.f};
-                rectangle(canvas, box, outline);
+                rectangle(canvas, box, kOutline);
                 const std::string style("records/ui/styles/text/style_textwhite_sizes.dbr");
                 std::wstring title(label.data());
                 if (title.size() > 48)
@@ -108,10 +121,82 @@ namespace RadarCanvas
                     if (title[end - 1] >= 0xD800 && title[end - 1] <= 0xDBFF) --end;
                     title.resize(end); title += L'\x2026';
                 }
-                text(canvas, static_cast<int>(left - offsetX + 8), static_cast<int>(top - offsetY + 6), title, style, colors[6], 0);
+                text(canvas, static_cast<int>(left - offsetX + 8), static_cast<int>(top - offsetY + 6), title, style, kColors[6], 0);
             }
         }
         drawnCount = count; lastDraw = now;
+    }
+    inline void MapLabel(void* canvas, float mouseX, float mouseY, float width, float height,
+        const Marker& marker, float offsetX, float offsetY)
+    {
+        if (!text || !rectangle) return;
+        std::array<wchar_t, 256> label{};
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, marker.label.c_str(), -1, label.data(),
+            static_cast<int>(label.size())) <= 0) return;
+        const float boxWidth = std::min(460.f, width - 16.f);
+        const float left = std::clamp(mouseX - boxWidth, 8.f, width - boxWidth - 8.f);
+        const float top = std::clamp(mouseY + 18.f, 8.f, height - 46.f);
+        const float box[]{ left - offsetX, top - offsetY, boxWidth, 34.f };
+        rectangle(canvas, box, kOutline);
+        const std::string style("records/ui/styles/text/style_textwhite_sizes.dbr");
+        std::wstring title(label.data());
+        if (title.size() > 48)
+        {
+            size_t end = 47;
+            if (title[end - 1] >= 0xD800 && title[end - 1] <= 0xDBFF) --end;
+            title.resize(end); title += L'\x2026';
+        }
+        text(canvas, static_cast<int>(left - offsetX + 8), static_cast<int>(top - offsetY + 6), title, style, kColors[6], 0);
+    }
+
+    // Full-screen map lane: world coordinates stay at their true position and
+    // markers outside the visible map are hidden, never clamped to an edge.
+    inline void DrawMap(void* canvas, unsigned long long context)
+    {
+        if (!available || !canvas) return;
+        ++mapDrawCalls;
+        DWORD foregroundPid = 0;
+        const auto window = GetForegroundWindow();
+        GetWindowThreadProcessId(window, &foregroundPid);
+        if (foregroundPid != GetCurrentProcessId() || IsIconic(window)) return;
+        Frame frame;
+        AcquireSRWLockShared(&stateLock); frame = mapState.active; ReleaseSRWLockShared(&stateLock);
+        const auto now = GetTickCount64();
+        if (!Fresh(frame, context, now)) { ++mapStaleRejects; return; }
+        auto graphics = MinimapTelemetry::engineInstance && *MinimapTelemetry::engineInstance
+            ? MinimapTelemetry::getGraphics(*MinimapTelemetry::engineInstance) : nullptr;
+        if (!graphics) return;
+        const int width = MinimapTelemetry::getWidth(graphics), height = MinimapTelemetry::getHeight(graphics);
+        if (width < 640 || height < 480) return;
+        const auto canvasBytes = static_cast<const unsigned char*>(canvas);
+        const float offsetX = *reinterpret_cast<const float*>(canvasBytes + MinimapTelemetry::canvasOffsetX);
+        const float offsetY = *reinterpret_cast<const float*>(canvasBytes + MinimapTelemetry::canvasOffsetY);
+        const float scale = std::clamp(height / 1080.f, .75f, 2.f);
+        POINT cursor{}; RECT client{};
+        const bool haveCursor = GetCursorPos(&cursor) && ScreenToClient(window, &cursor) &&
+            GetClientRect(window, &client) && client.right > 0 && client.bottom > 0;
+        const float mouseX = haveCursor ? cursor.x * static_cast<float>(width) / client.right : -10000.f;
+        const float mouseY = haveCursor ? cursor.y * static_cast<float>(height) / client.bottom : -10000.f;
+        const Marker* hovered = nullptr;
+        float nearest = 100000.f;
+        unsigned count = 0;
+        for (const auto& marker : frame.markers)
+        {
+            float x = 0, y = 0;
+            if (!MinimapTelemetry::ProjectGlobal(marker.x, marker.z, canvas, x, y)) continue;
+            // Hide off-edge markers instead of projecting directions inward.
+            if (x < 0 || y < 0 || x > static_cast<float>(width) || y > static_cast<float>(height)) { ++mapOffscreen; continue; }
+            const bool star = marker.kind == 0;
+            const float radius = (star ? 6.5f : 4.f) * scale;
+            Glyph(canvas, x, y, radius + scale, star, kOutline);
+            Glyph(canvas, x, y, radius, star, kColors[marker.kind]);
+            ++count;
+            const float distance = hypotf(mouseX - x, mouseY - y);
+            if (distance < std::max(10.f, radius * 1.5f) && distance < nearest) { hovered = &marker; nearest = distance; }
+        }
+        if (hovered) MapLabel(canvas, mouseX, mouseY, static_cast<float>(width), static_cast<float>(height),
+            *hovered, offsetX, offsetY);
+        mapDrawnCount = count; mapLastDraw = now;
     }
     inline void Initialize(HMODULE engine)
     {
@@ -120,6 +205,10 @@ namespace RadarCanvas
         rectangle = reinterpret_cast<RectFn>(GetProcAddress(engine, "?RenderRect@GraphicsCanvas@GAME@@QEAAXAEBVRect@2@AEBVColor@2@@Z"));
         text = reinterpret_cast<TextFn>(GetProcAddress(engine, "?RenderColoredText2d@GraphicsCanvas@GAME@@QEAAXHHAEBV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@4@AEBVColor@2@W4FontLayout@2@@Z"));
         available = fan && rectangle && text;
-        if (available) MinimapTelemetry::onFrame.store(&Draw, std::memory_order_release);
+        if (available)
+        {
+            MinimapTelemetry::onFrame.store(&Draw, std::memory_order_release);
+            MinimapTelemetry::onMapFrame.store(&DrawMap, std::memory_order_release);
+        }
     }
 }

@@ -20,6 +20,7 @@
 #include "PersistentBookmarks.h"
 #include "QuestStageCapture.h"
 #include "RadarCanvas.h"
+#include "MapProbe.h"
 #include "CharacterLevel.h"
 #include "CharacterResource.h"
 #include "ItemAffixes.h"
@@ -1401,7 +1402,7 @@ namespace
         if (strcmp(line, "PING") == 0)
         {
             if (!g_ready) { char value[64]{}; sprintf_s(value, "ERROR INIT %lu", g_error.load()); Reply(pipe, value); return; }
-            char capabilities[512] = "PONG 39 READY CAPS=LUA_SYNC,UNLOAD";
+            char capabilities[1024] = "PONG 40 READY CAPS=LUA_SYNC,UNLOAD";
             if (ItemAffixes::available) strcat_s(capabilities, ",ITEM_AFFIXES");
             if ((g_capabilities.load() & 1) != 0) strcat_s(capabilities, ",RESOURCES");
             if ((g_capabilities.load() & 2) != 0) strcat_s(capabilities, ",TOKENS");
@@ -1415,6 +1416,8 @@ namespace
             if (MinimapTelemetry::available) strcat_s(capabilities, ",MINIMAP");
             if (MinimapProjection::available) strcat_s(capabilities, ",MINIMAP_PROJECTION");
             if (RadarCanvas::available) strcat_s(capabilities, ",RADAR_CANVAS,RADAR_CANVAS_TRAVEL");
+            if (RadarCanvas::available && MinimapProjection::available) strcat_s(capabilities, ",MAP_CANVAS");
+            if (MapProbe::available) strcat_s(capabilities, ",MAP_PROBE,MAP_PROBE_V2");
             if (g_questTasksAvailable) strcat_s(capabilities, ",QUEST_TASKS_LIVE");
             if (CharacterLevel::available) strcat_s(capabilities, ",CHARACTER_LEVEL");
             if (CharacterResource::available) strcat_s(capabilities, ",RESOURCE_SET,LOADED_PROGRESSION,RESOURCE_CAP_BYPASS");
@@ -1613,6 +1616,38 @@ namespace
             }
             Reply(pipe, response.data()); return;
         }
+        if (strcmp(line, "MAP\tFRAME") == 0)
+        {
+            if (!RadarCanvas::available || !MinimapProjection::available) { Reply(pipe, "ERROR MAP_UNAVAILABLE"); return; }
+            unsigned long long context = 0;
+            if (!MinimapTelemetry::ReadMapFrame(context)) { Reply(pipe, "OK MAP_FRAME HIDDEN"); return; }
+            char response[96]{};
+            sprintf_s(response, "OK MAP_FRAME OPEN %llu", context);
+            Reply(pipe, response); return;
+        }
+        if (strncmp(line, "MAP\tCANVAS\t", 11) == 0)
+        {
+            if (!RadarCanvas::available || !MinimapProjection::available) { Reply(pipe, "ERROR MAP_CANVAS_UNAVAILABLE"); return; }
+            if (strcmp(line + 11, "STATUS") == 0)
+            {
+                const auto last = RadarCanvas::mapLastDraw.load();
+                char response[96]{};
+                sprintf_s(response, "OK MAP_CANVAS %u %llu", RadarCanvas::mapDrawnCount.load(),
+                    last ? GetTickCount64() - last : 999999ULL);
+                Reply(pipe, response); return;
+            }
+            if (strcmp(line + 11, "DIAG") == 0)
+            {
+                char response[160]{};
+                sprintf_s(response, "OK MAP_CANVAS_DIAG calls=%llu stale=%llu offscreen=%u drawn=%u",
+                    RadarCanvas::mapDrawCalls.load(), RadarCanvas::mapStaleRejects.load(),
+                    RadarCanvas::mapOffscreen.load(), RadarCanvas::mapDrawnCount.load());
+                Reply(pipe, response); return;
+            }
+            if (strcmp(line + 11, "CLEAR") != 0 && !g_captureActiveQuests.load() && !g_capturePointOfInterestMarkers.load())
+            { Reply(pipe, "ERROR RADAR_INACTIVE"); return; }
+            Reply(pipe, RadarCanvas::MapCommand(line + 11) ? "OK MAP_CANVAS" : "ERROR MAP_CANVAS_FRAME"); return;
+        }
         if (strncmp(line, "RADAR\tCANVAS\t", 13) == 0)
         {
             if (!RadarCanvas::available) { Reply(pipe, "ERROR RADAR_CANVAS_UNAVAILABLE"); return; }
@@ -1626,6 +1661,36 @@ namespace
             if (strcmp(line + 13, "CLEAR") != 0 && !g_captureActiveQuests.load() && !g_capturePointOfInterestMarkers.load())
             { Reply(pipe, "ERROR RADAR_INACTIVE"); return; }
             Reply(pipe, RadarCanvas::Command(line + 13) ? "OK RADAR_CANVAS" : "ERROR RADAR_CANVAS_FRAME"); return;
+        }
+        if (strncmp(line, "MAP\tPROBE\t", 10) == 0)
+        {
+            if (!MapProbe::available) { Reply(pipe, "ERROR MAP_PROBE_UNAVAILABLE"); return; }
+            const auto parts = RadarCanvas::Split(line, '\t');
+            if (parts.size() == 3 && parts[2] == "STATUS")
+            {
+                char response[768]{};
+                MapProbe::Describe(response, sizeof(response));
+                Reply(pipe, response); return;
+            }
+            if (parts.size() == 3 && parts[2] == "STOP")
+            {
+                MapProbe::Disarm();
+                Reply(pipe, "OK MAP_PROBE STOPPED"); return;
+            }
+            float x = 0, z = 0;
+            if (parts.size() != 5 || parts[2] != "START")
+            {
+                char response[96]{};
+                sprintf_s(response, "ERROR MAP_PROBE_REQUEST SHAPE=%zu", parts.size());
+                Reply(pipe, response); return;
+            }
+            if (!RadarCanvas::Number(parts[3], x) || !RadarCanvas::Number(parts[4], z) ||
+                !std::isfinite(x) || !std::isfinite(z) || fabsf(x) > 1000000 || fabsf(z) > 1000000)
+            { Reply(pipe, "ERROR MAP_PROBE_REQUEST COORDS"); return; }
+            MapProbe::Arm(x, z);
+            char response[160]{};
+            sprintf_s(response, "OK MAP_PROBE ARMED %.9g %.9g", x, z);
+            Reply(pipe, response); return;
         }
         if (strcmp(line, "RADAR\tMARKERS") == 0)
         {
@@ -1856,6 +1921,7 @@ namespace
                 ResolveGameApi(engine, game);
                 MinimapTelemetry::Initialize(engine);
                 RadarCanvas::Initialize(engine);
+                MapProbe::Initialize(engine);
                 MasteryAudit::Initialize(engine, game);
                 MasteryRespec::Initialize(engine, game);
                 CharacterResource::Initialize(engine, game);
@@ -1872,6 +1938,7 @@ namespace
                     MinimapTelemetry::available = false;
                     MinimapProjection::available = false;
                     RadarCanvas::available = false;
+                    MapProbe::available = false;
                     GameplayAssists::available = false;
                     MH_DisableHook(MH_ALL_HOOKS);
                     MH_RemoveHook(MH_ALL_HOOKS);

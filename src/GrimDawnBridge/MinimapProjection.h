@@ -85,6 +85,27 @@ namespace MinimapProjection
         else MH_RemoveHook(target);
     }
 
+    inline void* CurrentRegion()
+    {
+        return currentMap ? Field<void*>(currentMap, 0x1C0) : nullptr;
+    }
+
+    // The full-screen map reuses this render call. The audited map-enabled byte
+    // is set only while the corner minimap draws, so the same object rendering
+    // with it clear is the full-screen map.
+    inline bool MapOpen()
+    {
+        if (!available || !currentMap) return false;
+        __try
+        {
+            const auto map = static_cast<const unsigned char*>(currentMap);
+            return Field<void*>(map, 0) == executable + mapVtableRva &&
+                Field<unsigned char>(map, 0x161) == 0 && Field<int>(map, 0x38) != 2 &&
+                Field<int>(map, 0x170) == 1 && Field<void*>(map, 0x1C0) != nullptr;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
     // origin world X/Z, origin circle ratios X/Y, X basis X/Y, Z basis X/Y.
     inline bool Sample(float left, float top, float diameter, float canvasX, float canvasY, std::array<float, 8>& result)
     {
