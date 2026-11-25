@@ -31,6 +31,7 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
     public bool SupportsNativeRadar => ProtocolVersion >= 31 && SupportsMinimapProjection && Capabilities.Contains("RADAR_CANVAS");
     public bool SupportsNativeMap => ProtocolVersion >= 40 && SupportsNativeRadar && Capabilities.Contains("MAP_CANVAS");
     public bool SupportsRestoredShrines => ProtocolVersion >= 39 && Capabilities.Contains("RESTORED_SHRINES");
+    public bool SupportsLoreCodex => Capabilities.Contains("LORE_CODEX");
 
     public async Task<string> ConnectAsync(GameInstallation game, string bridgeDllPath, CancellationToken cancellationToken = default)
     {
@@ -282,6 +283,21 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
         "ERROR NO_PLAYER_REGION" or
         "ERROR INVALID_PLAYER_REGION";
 
+    public async Task<bool> HasLoreNoteAsync(string recordPath, CancellationToken cancellationToken = default)
+    {
+        EnsureCapability("LORE_CODEX");
+        recordPath = recordPath.Replace('\\', '/').Trim().TrimStart('/');
+        if (recordPath.Length is 0 or > 255 || recordPath.Any(char.IsControl))
+            throw new ArgumentException("Invalid lore note record path.", nameof(recordPath));
+        var response = await SendAsync("LORE\tHAS\t" + recordPath, cancellationToken);
+        return response switch
+        {
+            "OK LORE PRESENT" => true,
+            "OK LORE ABSENT" => false,
+            _ => throw new InvalidOperationException(response)
+        };
+    }
+
     public async Task<WorldPosition> GetPlayerPositionAsync(CancellationToken cancellationToken = default)
     {
         EnsureCapability("POSITION");
@@ -342,33 +358,15 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
     public async Task<NativeRadarStatus> GetNativeRadarStatusAsync(CancellationToken cancellationToken = default) =>
         NativeRadarStatus.Parse(await SendAsync("RADAR\tCANVAS\tSTATUS", cancellationToken));
 
-    public async Task<NativeMapFrame?> GetMapFrameAsync(CancellationToken cancellationToken = default)
+    public async Task<NativeRadarSurfaceFrame?> GetRadarFrameAsync(CancellationToken cancellationToken = default)
     {
-        if (!SupportsNativeMap) return null;
-        return NativeMapFrame.Parse(await SendAsync("MAP\tFRAME", cancellationToken));
+        if (SupportsNativeMap)
+            return NativeRadarSurfaceFrame.Parse(await SendAsync("RADAR\tFRAME", cancellationToken));
+        var minimap = await GetMinimapFrameAsync(cancellationToken);
+        return minimap?.Projection is not null && minimap.RenderContext != 0
+            ? new NativeRadarSurfaceFrame(minimap, false, minimap.RenderContext)
+            : null;
     }
-
-    public async Task SetNativeMapFrameAsync(ulong context, IEnumerable<NavigationOverlayPoint> points,
-        CancellationToken cancellationToken = default)
-    {
-        EnsureCapability("MAP_CANVAS");
-        foreach (var command in NativeRadarFrame.Commands(context, points,
-                     Capabilities.Contains("RADAR_CANVAS_TRAVEL"), "MAP"))
-        {
-            var response = await SendAsync(command, cancellationToken);
-            if (response != "OK MAP_CANVAS") throw new InvalidOperationException(response);
-        }
-    }
-
-    public async Task ClearNativeMapAsync(CancellationToken cancellationToken = default)
-    {
-        if (!SupportsNativeMap) return;
-        var response = await SendAsync("MAP\tCANVAS\tCLEAR", cancellationToken);
-        if (response != "OK MAP_CANVAS") throw new InvalidOperationException(response);
-    }
-
-    public async Task<NativeRadarStatus> GetNativeMapStatusAsync(CancellationToken cancellationToken = default) =>
-        NativeRadarStatus.Parse(await SendAsync("MAP\tCANVAS\tSTATUS", cancellationToken), "MAP_CANVAS");
 
     public async Task<IReadOnlySet<string>?> GetRestoredShrineUidsAsync(CancellationToken cancellationToken = default) =>
         (await GetRestoredShrineStateAsync(cancellationToken))?.Uids;

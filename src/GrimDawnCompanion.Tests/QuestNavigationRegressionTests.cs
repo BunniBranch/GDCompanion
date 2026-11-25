@@ -67,6 +67,43 @@ internal static class QuestNavigationRegressionTests
             "unsupported script overrides are not promoted into guessed distant markers");
         Check(QuestNavigationIndex.ReadScriptSpawns(script.Replace("if Server then", "if SomeOtherQuestCondition then")).Count == 0,
             "unresolved script control flow cannot produce a phantom distant NPC");
+        const string mpOverrideScript = """
+            local transition = false
+            local states = orderedTable()
+            states["SHOW"] = { state = 1, dbr = "records/npc.dbr" }
+            states[""] = { state = 0, dbr = nil }
+            function gd.npc.onAdd(objectId)
+                if Server then
+                    local MPOverrideDbr = nil
+                    local MPOverrideState = false
+                    if transition then
+                        MPOverrideDbr = "records/npc.dbr"
+                        MPOverrideState = true
+                    end
+                    local userdata = {}
+                    TokenStateBasedObjectSwap(objectId, userdata, states, nil, nil, MPOverrideState, MPOverrideDbr)
+                end
+            end
+            """;
+        Check(QuestNavigationIndex.ReadScriptSpawns(mpOverrideScript).ContainsKey("gd.npc.onAdd"),
+            "false-initialized multiplayer override boilerplate resolves to its ordered token table");
+        const string oneShotGuardScript = """
+            local spawnedBoss = false
+            local states = orderedTable()
+            states[""] = { state = 0, dbr = "records/boss.dbr" }
+            function gd.boss.onAdd(objectId)
+                if Server then
+                    if (not spawnedBoss) then
+                        local userdata = {}
+                        TokenStateBasedObjectSwap(objectId, userdata, states, Character, CharacterCreateArgs)
+                    end
+                end
+            end
+            """;
+        Check(QuestNavigationIndex.ReadScriptSpawns(oneShotGuardScript).ContainsKey("gd.boss.onAdd"),
+            "entity creation arguments and local false-initialized respawn guards resolve cleanly");
+        Check(QuestNavigationIndex.ReadScriptSpawns(oneShotGuardScript.Replace("(not spawnedBoss)", "player:HasToken(\"FOO\")")).Count == 0,
+            "gameplay token/faction conditions before swap remain excluded");
         var trailingCondition = script.Replace(
             "TokenStateBasedObjectSwap(objectId, userdata, states)",
             "TokenStateBasedObjectSwap(objectId, userdata, states)\nif UnrelatedQuestCondition then DoQuestWork() end");
@@ -116,6 +153,13 @@ internal static class QuestNavigationRegressionTests
             "current four-quest session resolves distant Barnabas and Kasparov without live or cached markers");
         Check(!liveDirections.Any(p => p.Marker.RecordPath.Contains("npc_johnbourbon")),
             "current session does not promote the inactive return-to-Captain task");
+        if (File.Exists(Path.Combine(game.RootDirectory, "gdx3", "resources", "Scripts.arc")))
+        {
+            var cursed = quests.Where(m => m.QuestTargets!.Any(t => t.QuestPath.Equals("quests/gdareah/sq_15_cursed.qst", StringComparison.OrdinalIgnoreCase))).ToArray();
+            Check(cursed.Any(m => m.RecordPath.EndsWith("npc_areah_cursed_hearth_interact_01.dbr", StringComparison.OrdinalIgnoreCase)) &&
+                  cursed.Any(m => m.RecordPath.EndsWith("npc_cursed_husband_01b.dbr", StringComparison.OrdinalIgnoreCase)),
+                "GDX3 Chillborn Curse resolves Maldurf's cabin hearth and Maldurf through MP-override script anchors");
+        }
         return world.SourceFingerprint;
     }
 }

@@ -28,7 +28,7 @@ public static class NavigationOverlayProjection
         double displayRange,
         string? currentLevelPath = null, MinimapProjection? projection = null, QuestNavigationState? questState = null,
         PoiFilter poiFilter = PoiFilter.All, IReadOnlySet<string>? restoredShrineUids = null, int? gameDifficulty = null,
-        IReadOnlySet<string>? openedChestTokens = null)
+        IReadOnlySet<string>? openedChestTokens = null, IReadOnlySet<string>? collectedLoreRecords = null)
     {
         displayRange = projection?.DisplayRange ?? Math.Clamp(displayRange, 25, 100);
         var active = activeQuestPaths.Select(NormalizeQuestPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -73,6 +73,7 @@ public static class NavigationOverlayProjection
                                                   (IsRiftgate(point.Marker) || point.Distance <= MaximumLocalPoiDistance) &&
                                                   !IsExcludedDevotionShrine(point.Marker, restoredShrineUids, gameDifficulty) &&
                                                   !IsExcludedOneShotChest(point.Marker, openedChestTokens) &&
+                                                  !IsExcludedLoreNote(point.Marker, collectedLoreRecords) &&
                                                   (IsLive(point.Marker) || MatchesPoiLocationDomain(currentPoiRegion, point.Marker)))
                 .ToArray();
             // Game-owned live markers are the only reliable nearby POIs: the
@@ -82,6 +83,7 @@ public static class NavigationOverlayProjection
                                                            IsLive(point.Marker) && !IsRiftgate(point.Marker) &&
                                                            !IsDevotionShrine(point.Marker) &&
                                                            !IsOneShotChest(point.Marker) &&
+                                                           !IsLoreNote(point.Marker) &&
                                                            point.Distance <= displayRange)
                 .OrderBy(point => point.Distance)
                 .Take(MaximumPoiTargets)
@@ -118,6 +120,18 @@ public static class NavigationOverlayProjection
             var selectedChests = SelectClosestDistinct(liveChests, catalogChests, MaximumPoiTargets);
             var nearbyChests = selectedChests.Where(point => point.Distance <= displayRange).ToArray();
             var distantChests = selectedChests.Where(point => point.Distance > displayRange).ToArray();
+            // Grim Dawn never emits live minimap nuggets for lore notes either,
+            // so keep uncollected catalog lore notes visible at all distances up
+            // to MaximumLocalPoiDistance instead of dropping them nearby.
+            var liveLore = poiPoints.Where(point => IsLive(point.Marker) && IsLoreNote(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var catalogLore = poiPoints.Where(point => IsLoreNote(point.Marker) && !IsLive(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var selectedLore = SelectClosestDistinct(liveLore, catalogLore, MaximumPoiTargets);
+            var nearbyLore = selectedLore.Where(point => point.Distance <= displayRange).ToArray();
+            var distantLore = selectedLore.Where(point => point.Distance > displayRange).ToArray();
             // Static boats and ferries are absent from some game minimap
             // passes. Their catalog placements are safe and useful nearby,
             // while other catalog POIs stay direction-only to avoid markers
@@ -127,20 +141,21 @@ public static class NavigationOverlayProjection
                 .OrderBy(point => point.Distance)
                 .Take(MaximumNearbyTravelTargets)
                 .ToArray();
-            var nearby = nearbyRiftgates.Concat(nearbyShrines).Concat(nearbyChests).Concat(nearbyOtherLive).Concat(nearbyTravel)
+            var nearby = nearbyRiftgates.Concat(nearbyShrines).Concat(nearbyChests).Concat(nearbyLore).Concat(nearbyOtherLive).Concat(nearbyTravel)
                 .DistinctBy(point => point.Marker.Id)
-                .Take(Math.Max(0, MaximumPoiTargets - distantRiftgates.Length - distantShrines.Length - distantChests.Length))
+                .Take(Math.Max(0, MaximumPoiTargets - distantRiftgates.Length - distantShrines.Length - distantChests.Length - distantLore.Length))
                 .ToArray();
             var fallbackCount = Math.Max(0, MinimumPoiTargets - nearby.Length);
             var distant = poiPoints.Where(point => point.Marker.Category != "Quest Objective" &&
                                                 point.Marker.Category != "Riftgate" &&
                                                 !IsDevotionShrine(point.Marker) &&
                                                 !IsOneShotChest(point.Marker) &&
+                                                !IsLoreNote(point.Marker) &&
                                                 !IsLive(point.Marker) &&
                                                 point.Distance > displayRange)
                 .OrderBy(point => point.Distance)
                 .Take(fallbackCount);
-            pois = nearby.Concat(distantRiftgates).Concat(distantShrines).Concat(distantChests).Concat(distant)
+            pois = nearby.Concat(distantRiftgates).Concat(distantShrines).Concat(distantChests).Concat(distantLore).Concat(distant)
                 .DistinctBy(point => point.Marker.Id)
                 .Take(MaximumPoiTargets)
                 .ToArray();
@@ -352,9 +367,37 @@ public static class NavigationOverlayProjection
 
     private static bool IsOneShotChest(WorldMarkerRecord marker) => marker.Category == "One-Shot Chest";
 
+    private static bool IsLoreNote(WorldMarkerRecord marker) => marker.Category == "Lore Note";
+
     private static bool IsExcludedOneShotChest(WorldMarkerRecord marker, IReadOnlySet<string>? openedChestTokens) =>
         IsOneShotChest(marker) && openedChestTokens is not null && marker.ExcludedTokens is { Length: > 0 } &&
         marker.ExcludedTokens.Any(openedChestTokens.Contains);
+
+    private static bool IsExcludedLoreNote(WorldMarkerRecord marker, IReadOnlySet<string>? collectedLoreRecords) =>
+        IsLoreNote(marker) && collectedLoreRecords is not null &&
+        !string.IsNullOrEmpty(marker.LoreRecordPath) &&
+        collectedLoreRecords.Contains(marker.LoreRecordPath);
+
+    public static IEnumerable<string> CandidateLoreRecords(
+        WorldPosition player,
+        IEnumerable<WorldMarkerRecord> catalog,
+        string? currentLevelPath = null,
+        IReadOnlySet<string>? knownCollectedLore = null)
+    {
+        var currentPoiRegion = LevelRegionFamily(currentLevelPath ?? "");
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var marker in catalog
+                     .Where(marker => !IsLive(marker) && IsLoreNote(marker) &&
+                                      Distance(player, marker) <= MaximumLocalPoiDistance &&
+                                      MatchesPoiLocationDomain(currentPoiRegion, marker) &&
+                                      !string.IsNullOrEmpty(marker.LoreRecordPath) &&
+                                      !IsExcludedLoreNote(marker, knownCollectedLore))
+                     .OrderBy(marker => Distance(player, marker)))
+        {
+            if (seen.Add(marker.LoreRecordPath!))
+                yield return marker.LoreRecordPath!;
+        }
+    }
 
     public static IEnumerable<string[]> CandidateOneShotChestTokens(
         WorldPosition player,

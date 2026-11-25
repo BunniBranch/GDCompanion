@@ -198,6 +198,35 @@ internal static class AffixAndPoiRegressionTests
             new HashSet<string>(StringComparer.OrdinalIgnoreCase){"DUNGEONCHEST_A"}).SelectMany(x=>x).ToArray();
         require(candidateTokens.SequenceEqual(["DUNGEONCHEST_B","DUNGEONCHEST_C"]),
             "candidate one-shot chest tokens are ordered closest-first within 1000m and locale, deduplicated, and skip known opened tokens");
+
+        var lorePoints=new[]{
+            new WorldMarkerRecord("lore-near","Lore Note","records/items/loreobjects/loreobject_a.dbr","Levels/Region0A001.lvl",115,0,100,DisplayName:"Harbormaster's Log",LoreRecordPath:"records/items/loreobjects/loreobject_a.dbr"),
+            new WorldMarkerRecord("lore-far","Lore Note","records/items/loreobjects/lorechest_b.dbr","Levels/Region0A058.lvl",260,0,100,DisplayName:"Creed's Journal",LoreRecordPath:"records/items/loreobjects/loreobject_b.dbr"),
+            new WorldMarkerRecord("lore-too-far","Lore Note","records/items/loreobjects/loreobject_c.dbr","Levels/Region0B002.lvl",1101,0,100,DisplayName:"Far Note",LoreRecordPath:"records/items/loreobjects/loreobject_c.dbr"),
+            new WorldMarkerRecord("lore-ug","Lore Note","records/items/loreobjects/loreobject_ug.dbr","Levels/Undergrounds/RegionUG_CaveBurial_A01.lvl",110,0,100,DisplayName:"Cave Note",LoreRecordPath:"records/items/loreobjects/loreobject_ug.dbr")
+        };
+        var crowdedWithLore=Enumerable.Range(0,10)
+            .Select(i=>new WorldMarkerRecord($"near-npc-lore-{i}","Vendor",$"live://vendor/{i}","live://current-map",105+i,0,100,["$live"]))
+            .Concat(lorePoints).ToArray();
+        var visibleLore=NavigationOverlayProjection.Build(domainPlayer,crowdedWithLore,[],false,true,40,"Levels/Region0A001.lvl");
+        require(visibleLore.Count(x=>x.Marker.Category=="Lore Note")==2 &&
+                visibleLore.Any(x=>x.Marker.Id=="lore-near" && !x.IsDistant) &&
+                visibleLore.Any(x=>x.Marker.Id=="lore-far" && x.IsDistant) &&
+                visibleLore.All(x=>x.Marker.Id!="lore-too-far"),
+            "lore notes stay visible both nearby and distant within 1000m even when nearby POIs exceed MinimumPoiTargets");
+        var skippedCollectedLore=NavigationOverlayProjection.Build(domainPlayer,crowdedWithLore,[],false,true,40,"Levels/Region0A001.lvl",
+            collectedLoreRecords:new HashSet<string>(StringComparer.OrdinalIgnoreCase){"RECORDS/ITEMS/LOREOBJECTS/LOREOBJECT_A.DBR"});
+        require(skippedCollectedLore.Where(x=>x.Marker.Category=="Lore Note").Select(x=>x.Marker.Id).SequenceEqual(["lore-far"]),
+            "already-collected lore notes are filtered out case-insensitively while retaining uncollected notes");
+        require(NavigationOverlayProjection.Build(domainPlayer,lorePoints,[],false,true,40,"Levels/Region0A001.lvl",
+                poiFilter:PoiFilter.All & ~PoiFilter.Lore).Count==0 &&
+                NavigationOverlayProjection.Build(domainPlayer,lorePoints,[],false,true,40,"Levels/Undergrounds/RegionUG_CaveBurial_A02.lvl")
+                .Single().Marker.Id=="lore-ug",
+            "lore notes respect the Lore POI filter and overworld vs. underground locale separation");
+        var candidateLore=NavigationOverlayProjection.CandidateLoreRecords(domainPlayer,lorePoints,"Levels/Region0A001.lvl",
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase){"records/items/loreobjects/loreobject_a.dbr"}).ToArray();
+        require(candidateLore.SequenceEqual(["records/items/loreobjects/loreobject_b.dbr"]),
+            "candidate lore records are ordered closest-first within 1000m and locale, deduplicated, and skip known collected records");
         var limits=CharacterResourceLimits.Parse("OK RESOURCE_LIMITS 10 100 3 2000000000 250 109 55 20 9 3 10 10 5 8 0");
         require(limits.Available(1,true)==9980 && limits.Available(2,true)==9991 && limits.Available(3,true)==9997 && limits.EffectiveCap(0,true)==2_000_000_000 && limits.Available(1)==230,"bypass applies only to allocated-adjusted point pools and never changes normal budgets");
         require(CharacterResourcePreparation.Parse("OK RESOURCE_PREPARED 7 3 5 1000 9997 3 10000 0054").Target==1000,"bounded above-cap preparation is parsed without truncation");

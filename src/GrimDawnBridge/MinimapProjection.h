@@ -90,30 +90,18 @@ namespace MinimapProjection
         return currentMap ? Field<void*>(currentMap, 0x1C0) : nullptr;
     }
 
-    // The full-screen map reuses this render call. The audited map-enabled byte
-    // is set only while the corner minimap draws, so the same object rendering
-    // with it clear is the full-screen map.
-    inline bool MapOpen()
-    {
-        if (!available || !currentMap) return false;
-        __try
-        {
-            const auto map = static_cast<const unsigned char*>(currentMap);
-            return Field<void*>(map, 0) == executable + mapVtableRva &&
-                Field<unsigned char>(map, 0x161) == 0 && Field<int>(map, 0x38) != 2 &&
-                Field<int>(map, 0x170) == 1 && Field<void*>(map, 0x1C0) != nullptr;
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-    }
-
-    // origin world X/Z, origin circle ratios X/Y, X basis X/Y, Z basis X/Y.
-    inline bool Sample(float left, float top, float diameter, float canvasX, float canvasY, std::array<float, 8>& result)
+    // Shared 3-point orthographic affine sampler for both the corner minimap
+    // (0x161 != 0, circle-normalized) and the full-screen map (0x161 == 0,
+    // viewport pixels). Uses only exported WorldVec3 + Camera::Project calls.
+    inline bool SampleAffine(bool fullMap, float originX, float originY, float scale, float canvasX, float canvasY,
+        std::array<float, 8>& result, void** outRegion = nullptr)
     {
         if (!available || !currentMap || !currentOffset) return false;
         __try
         {
             const auto map = static_cast<const unsigned char*>(currentMap);
-            if (Field<void*>(map, 0) != executable + mapVtableRva || !Field<unsigned char>(map, 0x161) ||
+            if (Field<void*>(map, 0) != executable + mapVtableRva ||
+                (Field<unsigned char>(map, 0x161) == 0) != fullMap ||
                 Field<int>(map, 0x38) == 2) return false; // The native render skips mode 2 (closed).
             auto region = Field<void*>(map, 0x1C0);
             auto camera = map + 0x170;
@@ -129,19 +117,36 @@ namespace MinimapProjection
             project(camera, p, origin, viewport);
             project(camera, x, xPoint, viewport);
             project(camera, z, zPoint, viewport);
-            const float radius = diameter * .5f;
+            const float screenX = p[0] + Field<float>(map, 0xAC4) + currentOffset[0] + canvasX;
+            const float screenY = p[1] + Field<float>(map, 0xAC8) + currentOffset[1] + canvasY;
             result = { world[0], world[2],
-                (p[0] + Field<float>(map, 0xAC4) + currentOffset[0] + canvasX - left - radius) / radius,
-                (p[1] + Field<float>(map, 0xAC8) + currentOffset[1] + canvasY - top - radius) / radius,
-                (x[0] - p[0]) / (16 * radius), (x[1] - p[1]) / (16 * radius),
-                (z[0] - p[0]) / (16 * radius), (z[1] - p[1]) / (16 * radius) };
+                (screenX - originX) / scale, (screenY - originY) / scale,
+                (x[0] - p[0]) / (16 * scale), (x[1] - p[1]) / (16 * scale),
+                (z[0] - p[0]) / (16 * scale), (z[1] - p[1]) / (16 * scale) };
             for (auto value : result) if (!std::isfinite(value)) return false;
             const float xs = hypotf(result[4], result[5]), zs = hypotf(result[6], result[7]);
-            const bool valid = xs >= .001f && xs <= 1 && zs >= .001f && zs <= 1 &&
+            const float minScale = fullMap ? .01f : .001f;
+            const float maxScale = fullMap ? 1000.f : 1.f;
+            const bool valid = xs >= minScale && xs <= maxScale && zs >= minScale && zs <= maxScale &&
                 fabsf(xs - zs) < xs * .02f && fabsf(result[4] * result[6] + result[5] * result[7]) < xs * zs * .02f &&
-                fabsf(result[2]) < 2 && fabsf(result[3]) < 2;
+                (fullMap || (fabsf(result[2]) < 2 && fabsf(result[3]) < 2));
+            if (valid && outRegion) *outRegion = region;
             return valid;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    // origin world X/Z, origin circle ratios X/Y, X basis X/Y, Z basis X/Y.
+    inline bool Sample(float left, float top, float diameter, float canvasX, float canvasY,
+        std::array<float, 8>& result, void** outRegion = nullptr)
+    {
+        const float radius = diameter * .5f;
+        return SampleAffine(false, left + radius, top + radius, radius, canvasX, canvasY, result, outRegion);
+    }
+
+    // origin world X/Z, origin viewport pixels X/Y, X pixel basis, Z pixel basis.
+    inline bool SampleMap(float canvasX, float canvasY, std::array<float, 8>& result, void** outRegion = nullptr)
+    {
+        return SampleAffine(true, 0.f, 0.f, 1.f, canvasX, canvasY, result, outRegion);
     }
 }

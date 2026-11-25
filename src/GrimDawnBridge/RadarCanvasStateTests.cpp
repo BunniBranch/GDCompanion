@@ -64,6 +64,15 @@ int main()
     p = Project(marker, transform);
     Check(fabsf(p[0] - .95f) < .00001f && p[1] == 0,
         "near-edge visible quest is not displaced into the distant lane");
+    std::array<float, 8> mapTransform{100,200,960,540,2.f,0,0,-2.f};
+    marker = {150,175,3,"Distant Riftgate"};
+    const auto raw = ProjectRaw(marker, mapTransform);
+    Check(fabsf(raw[0] - 1060.f) < .0001f && fabsf(raw[1] - 590.f) < .0001f,
+        "full-map affine projection maps world coordinates directly to viewport pixels without rim clamping");
+    marker = {10000,200,0,"Offscreen Quest"};
+    const auto offscreen = ProjectRaw(marker, mapTransform);
+    Check(offscreen[0] > 20000.f && fabsf(offscreen[1] - 540.f) < .0001f,
+        "full-map affine projection preserves off-screen coordinates for viewport culling");
     Check(state.Command("BEGIN\t8\t0", 400) && state.Command("COMMIT", 401) && state.active.markers.empty(),
         "empty target selection removes previous markers");
     Check(state.Command("BEGIN\t8\t1", 500) && state.Command("CLEAR", 501) && !state.Command("COMMIT", 502) &&

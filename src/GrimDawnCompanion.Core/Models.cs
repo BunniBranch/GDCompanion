@@ -69,7 +69,8 @@ public sealed record WorldMarkerRecord(
     bool IsSpawnArea = false,
     string? EntityUid = null,
     byte DisabledDifficultiesMask = 0,
-    bool HideMapIcon = false);
+    bool HideMapIcon = false,
+    string? LoreRecordPath = null);
 
 public sealed record QuestTargetBinding(string QuestPath, uint TaskUid);
 public sealed record QuestSpawnLink(string RecordPath, string[] RequiredTokens, string[] ExcludedTokens);

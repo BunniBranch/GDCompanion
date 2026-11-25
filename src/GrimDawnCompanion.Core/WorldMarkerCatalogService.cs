@@ -117,7 +117,7 @@ public sealed class WorldMarkerCatalogService
                         try
                         {
                             ParseLevel(stream, levels[i], ref scratchBuffer, localMarkers,
-                                questRecords, markerMetadata.RiftgateNames, markerMetadata.Shrines, markerMetadata.ChestOpenTokens);
+                                questRecords, markerMetadata.RiftgateNames, markerMetadata.Shrines, markerMetadata.ChestOpenTokens, markerMetadata.LoreNotes);
                         }
                         catch (Exception exception) when (exception is InvalidDataException or OverflowException or DecoderFallbackException)
                         {
@@ -195,7 +195,8 @@ public sealed class WorldMarkerCatalogService
         IReadOnlyDictionary<string, string[]>? questRecords = null,
         IReadOnlyDictionary<string, string>? riftgateNames = null,
         IReadOnlyDictionary<string, ShrineMetadata>? shrineMetadata = null,
-        IReadOnlyDictionary<string, string[]>? chestOpenTokens = null)
+        IReadOnlyDictionary<string, string[]>? chestOpenTokens = null,
+        IReadOnlyDictionary<string, LoreMetadata>? loreMetadata = null)
     {
         var levels = ReadMapLevels(world);
         var markers = new List<WorldMarkerRecord>();
@@ -205,7 +206,7 @@ public sealed class WorldMarkerCatalogService
             foreach (var level in levels)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                try { ParseLevel(world, level, ref scratchBuffer, markers, questRecords, riftgateNames, shrineMetadata, chestOpenTokens); }
+                try { ParseLevel(world, level, ref scratchBuffer, markers, questRecords, riftgateNames, shrineMetadata, chestOpenTokens, loreMetadata); }
                 catch (Exception exception) when (exception is InvalidDataException or OverflowException or DecoderFallbackException)
                 {
                     // A malformed embedded level must not prevent the remaining
@@ -317,7 +318,8 @@ public sealed class WorldMarkerCatalogService
     private static void ParseLevel(Stream world, LevelEntry level, ref byte[] scratchBuffer, List<WorldMarkerRecord> output,
         IReadOnlyDictionary<string, string[]>? questRecords, IReadOnlyDictionary<string, string>? riftgateNames,
         IReadOnlyDictionary<string, ShrineMetadata>? shrineMetadata,
-        IReadOnlyDictionary<string, string[]>? chestOpenTokens = null)
+        IReadOnlyDictionary<string, string[]>? chestOpenTokens = null,
+        IReadOnlyDictionary<string, LoreMetadata>? loreMetadata = null)
     {
         var offset = level.DataOffset;
         // The index scan may encounter incidental `.lvl` bytes. Reject those
@@ -336,7 +338,7 @@ public sealed class WorldMarkerCatalogService
         if (chunkType == 5)
         {
             ReadAndParsePlacementChunk(world, dataStart, (int)chunkSize, ref scratchBuffer,
-                level, output, questRecords, riftgateNames, shrineMetadata, chestOpenTokens);
+                level, output, questRecords, riftgateNames, shrineMetadata, chestOpenTokens, loreMetadata);
             return;
         }
 
@@ -352,7 +354,7 @@ public sealed class WorldMarkerCatalogService
             if (chunkType == 5)
             {
                 ReadAndParsePlacementChunk(world, dataStart, (int)chunkSize, ref scratchBuffer,
-                    level, output, questRecords, riftgateNames, shrineMetadata, chestOpenTokens);
+                    level, output, questRecords, riftgateNames, shrineMetadata, chestOpenTokens, loreMetadata);
                 return;
             }
             chunkCursor = dataStart + chunkSize;
@@ -362,7 +364,8 @@ public sealed class WorldMarkerCatalogService
     private static void ReadAndParsePlacementChunk(Stream world, long dataStart, int dataLength, ref byte[] scratchBuffer,
         LevelEntry level, List<WorldMarkerRecord> output, IReadOnlyDictionary<string, string[]>? questRecords,
         IReadOnlyDictionary<string, string>? riftgateNames, IReadOnlyDictionary<string, ShrineMetadata>? shrineMetadata,
-        IReadOnlyDictionary<string, string[]>? chestOpenTokens = null)
+        IReadOnlyDictionary<string, string[]>? chestOpenTokens = null,
+        IReadOnlyDictionary<string, LoreMetadata>? loreMetadata = null)
     {
         if (scratchBuffer.Length < dataLength)
         {
@@ -371,7 +374,7 @@ public sealed class WorldMarkerCatalogService
         }
         var chunk = scratchBuffer.AsSpan(0, dataLength);
         ReadSpan(world, dataStart, chunk);
-        ParsePlacementChunk(chunk, level, output, questRecords, riftgateNames, shrineMetadata, chestOpenTokens);
+        ParsePlacementChunk(chunk, level, output, questRecords, riftgateNames, shrineMetadata, chestOpenTokens, loreMetadata);
     }
 
     private readonly record struct ResolvedStringEntry(byte State, string? RecordPath, string? Category, string[]? QuestPaths);
@@ -379,7 +382,8 @@ public sealed class WorldMarkerCatalogService
     private static void ParsePlacementChunk(ReadOnlySpan<byte> chunk, LevelEntry level,
         List<WorldMarkerRecord> output, IReadOnlyDictionary<string, string[]>? questRecords,
         IReadOnlyDictionary<string, string>? riftgateNames, IReadOnlyDictionary<string, ShrineMetadata>? shrineMetadata,
-        IReadOnlyDictionary<string, string[]>? chestOpenTokens = null)
+        IReadOnlyDictionary<string, string[]>? chestOpenTokens = null,
+        IReadOnlyDictionary<string, LoreMetadata>? loreMetadata = null)
     {
         if (chunk.Length < 4) return;
         var stringCountRaw = ReadU32(chunk, 0);
@@ -447,10 +451,14 @@ public sealed class WorldMarkerCatalogService
                 var entityUid = hasUid ? Convert.ToHexString(uidBytes) : null;
                 var id = $"{level.Name}|{entry.RecordPath!}|{BitConverter.SingleToUInt32Bits(x):x8}|{BitConverter.SingleToUInt32Bits(z):x8}";
                 var normalizedRecord = entry.RecordPath!.TrimStart('/');
+                LoreMetadata? lore = null;
+                if (entry.Category == "Lore Note") loreMetadata?.TryGetValue(normalizedRecord, out lore);
                 var displayName = entry.Category == "Riftgate" && riftgateNames is not null &&
                                   riftgateNames.TryGetValue(normalizedRecord, out var localizedRiftgate)
                     ? localizedRiftgate
-                    : DisplayName(entry.RecordPath!, entry.Category!);
+                    : !string.IsNullOrWhiteSpace(lore?.DisplayName)
+                        ? lore.DisplayName
+                        : DisplayName(entry.RecordPath!, entry.Category!);
                 ShrineMetadata? shrine = null;
                 if (entry.Category == "Devotion Shrine") shrineMetadata?.TryGetValue(normalizedRecord, out shrine);
                 string[]? excludedTokens = null;
@@ -459,7 +467,8 @@ public sealed class WorldMarkerCatalogService
                     ExcludedTokens: excludedTokens,
                     EntityUid: entityUid,
                     DisabledDifficultiesMask: shrine?.DisabledDifficultiesMask ?? 0,
-                    HideMapIcon: shrine?.HideMapIcon ?? false));
+                    HideMapIcon: shrine?.HideMapIcon ?? false,
+                    LoreRecordPath: lore?.LoreRecordPath));
             }
         }
         finally
@@ -573,33 +582,73 @@ public sealed class WorldMarkerCatalogService
         }
 
         var perArchive = new (Dictionary<string, string> Rifts, Dictionary<string, ShrineMetadata> Shrines,
-            Dictionary<string, OneShotChestArzEntry> Chests)[archives.Length];
+            Dictionary<string, OneShotChestArzEntry> Chests, Dictionary<string, LoreArzEntry> Lore)[archives.Length];
         Parallel.For(0, archives.Length, new ParallelOptions { CancellationToken = cancellationToken }, index =>
         {
             var localRifts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var localShrines = new Dictionary<string, ShrineMetadata>(StringComparer.OrdinalIgnoreCase);
             var localChests = new Dictionary<string, OneShotChestArzEntry>(StringComparer.OrdinalIgnoreCase);
-            try { ReadMarkerMetadataFromArz(archives[index].DatabasePath, tags, localRifts, localShrines, localChests, cancellationToken); }
+            var localLore = new Dictionary<string, LoreArzEntry>(StringComparer.OrdinalIgnoreCase);
+            try { ReadMarkerMetadataFromArz(archives[index].DatabasePath, tags, localRifts, localShrines, localChests, localLore, cancellationToken); }
             catch (Exception) when (!cancellationToken.IsCancellationRequested) { }
-            perArchive[index] = (localRifts, localShrines, localChests);
+            perArchive[index] = (localRifts, localShrines, localChests, localLore);
         });
 
         var riftgateNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var shrines = new Dictionary<string, ShrineMetadata>(StringComparer.OrdinalIgnoreCase);
         var chestEntries = new Dictionary<string, OneShotChestArzEntry>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (localRifts, localShrines, localChests) in perArchive)
+        var loreEntries = new Dictionary<string, LoreArzEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (localRifts, localShrines, localChests, localLore) in perArchive)
         {
             foreach (var pair in localRifts) riftgateNames[pair.Key] = pair.Value;
             foreach (var pair in localShrines) shrines[pair.Key] = pair.Value;
             foreach (var pair in localChests) chestEntries[pair.Key] = pair.Value;
+            foreach (var pair in localLore) loreEntries[pair.Key] = pair.Value;
         }
         var chestOpenTokens = ResolveOneShotChestTokens(chestEntries, await luaScriptsTask);
-        return new ArzMarkerMetadata(riftgateNames, shrines, chestOpenTokens);
+        var loreNotes = ResolveLoreMetadata(loreEntries, tags);
+        return new ArzMarkerMetadata(riftgateNames, shrines, chestOpenTokens, loreNotes);
+    }
+
+    private static Dictionary<string, LoreMetadata> ResolveLoreMetadata(
+        IReadOnlyDictionary<string, LoreArzEntry> loreEntries,
+        IReadOnlyDictionary<string, string> tags)
+    {
+        var result = new Dictionary<string, LoreMetadata>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (recordPath, entry) in loreEntries)
+        {
+            string? notePath = null;
+            if (string.Equals(entry.Class, "ItemNote", StringComparison.OrdinalIgnoreCase))
+                notePath = recordPath;
+            else if (!string.IsNullOrWhiteSpace(entry.DropItem))
+                notePath = entry.DropItem;
+            else if (!string.IsNullOrWhiteSpace(entry.LootTable) &&
+                     loreEntries.TryGetValue(entry.LootTable, out var tableEntry) &&
+                     !string.IsNullOrWhiteSpace(tableEntry.FirstLoreLoot))
+                notePath = tableEntry.FirstLoreLoot;
+
+            string? nameTag = null;
+            if (notePath is not null && loreEntries.TryGetValue(notePath, out var noteEntry))
+                nameTag = noteEntry.DescriptionTag;
+            nameTag ??= entry.DescriptionTag;
+
+            string? displayName = null;
+            if (!string.IsNullOrWhiteSpace(nameTag) && tags.TryGetValue(nameTag, out var localized))
+            {
+                var cleaned = Regex.Replace(localized, @"\{\^[^}]*\}", "").Trim();
+                if (cleaned.Length > 0) displayName = cleaned;
+            }
+
+            if (notePath is not null || displayName is not null)
+                result[recordPath] = new LoreMetadata(notePath?.ToLowerInvariant(), displayName);
+        }
+        return result;
     }
 
     private static void ReadMarkerMetadataFromArz(string arzPath, IReadOnlyDictionary<string, string> tags,
         Dictionary<string, string> riftgateNames, Dictionary<string, ShrineMetadata> shrines,
-        Dictionary<string, OneShotChestArzEntry> chestEntries, CancellationToken cancellationToken)
+        Dictionary<string, OneShotChestArzEntry> chestEntries, Dictionary<string, LoreArzEntry> loreEntries,
+        CancellationToken cancellationToken)
     {
         using var stream = File.OpenRead(arzPath);
         if (stream.Length < 24) return;
@@ -657,11 +706,12 @@ public sealed class WorldMarkerCatalogService
             var rawName = stringTable.AsSpan(nameOffset, nameLength);
             if (!ContainsAsciiIgnoreCase(rawName, "riftgate"u8) &&
                 !ContainsAsciiIgnoreCase(rawName, "devotionshrine"u8) &&
-                !ContainsAsciiIgnoreCase(rawName, "oneshotchests"u8))
+                !ContainsAsciiIgnoreCase(rawName, "oneshotchests"u8) &&
+                !ContainsAsciiIgnoreCase(rawName, "loreobjects"u8))
                 continue;
             var recordPath = Encoding.Latin1.GetString(rawName).Replace('\\', '/').TrimStart('/');
             var category = Classify(recordPath);
-            if (category is not ("Riftgate" or "Devotion Shrine" or "One-Shot Chest")) continue;
+            if (category is not ("Riftgate" or "Devotion Shrine" or "One-Shot Chest" or "Lore Note")) continue;
             if (category == "Riftgate" && tags.Count == 0) continue;
             if (uncompressedSize > 4 * 1024 * 1024 || compressedSize > stream.Length) continue;
             var fileOffset = 24L + dataOffset;
@@ -671,6 +721,7 @@ public sealed class WorldMarkerCatalogService
                 ? compressed
                 : ArcReader.DecompressBlock(compressed, (int)uncompressedSize);
             string? description = null, actorName = null, teleportTag = null, zoneTag = null, onOpen = null;
+            string? loreClass = null, loreDropItem = null, loreLootTable = null, firstLoreLoot = null;
             List<string>? chestRefs = null;
             byte disabledMask = 0;
             var hideMapIcon = false;
@@ -734,6 +785,32 @@ public sealed class WorldMarkerCatalogService
                             }
                         }
                     }
+                    else if (category == "Lore Note" && dataType == 2)
+                    {
+                        var valId = ReadU32(raw, fc);
+                        if (valId < stringCount)
+                        {
+                            if (key.Equals("Class", StringComparison.Ordinal)) loreClass = GetString(valId);
+                            else if (key.Equals("description", StringComparison.OrdinalIgnoreCase)) description = GetString(valId);
+                            else if (key.Equals("perPartyMemberDropItemName", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var candidate = GetString(valId).Replace('\\', '/').TrimStart('/');
+                                if (candidate.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase)) loreDropItem = candidate;
+                            }
+                            else if (key.Equals("lootTable", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var candidate = GetString(valId).Replace('\\', '/').TrimStart('/');
+                                if (candidate.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase)) loreLootTable = candidate;
+                            }
+                            else if (firstLoreLoot is null && key.StartsWith("lootName", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var candidate = GetString(valId).Replace('\\', '/').TrimStart('/');
+                                if (candidate.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase) &&
+                                    candidate.StartsWith("records/items/loreobjects/", StringComparison.OrdinalIgnoreCase))
+                                    firstLoreLoot = candidate;
+                            }
+                        }
+                    }
                 }
                 fc += (int)valueBytes;
             }
@@ -754,9 +831,13 @@ public sealed class WorldMarkerCatalogService
             {
                 shrines[recordPath] = new ShrineMetadata(disabledMask, hideMapIcon);
             }
-            else
+            else if (category == "One-Shot Chest")
             {
                 chestEntries[recordPath] = new OneShotChestArzEntry(onOpen, chestRefs);
+            }
+            else
+            {
+                loreEntries[recordPath] = new LoreArzEntry(loreClass, description, loreDropItem, loreLootTable, firstLoreLoot);
             }
         }
     }
@@ -874,10 +955,13 @@ public sealed class WorldMarkerCatalogService
     }
 
     internal sealed record ShrineMetadata(byte DisabledDifficultiesMask, bool HideMapIcon);
+    internal sealed record LoreMetadata(string? LoreRecordPath, string? DisplayName);
     private sealed record OneShotChestArzEntry(string? OnOpen, List<string>? References);
+    private sealed record LoreArzEntry(string? Class, string? DescriptionTag, string? DropItem, string? LootTable, string? FirstLoreLoot);
     private sealed record ArzMarkerMetadata(
         Dictionary<string, string> RiftgateNames,
         Dictionary<string, ShrineMetadata> Shrines,
-        Dictionary<string, string[]> ChestOpenTokens);
+        Dictionary<string, string[]> ChestOpenTokens,
+        Dictionary<string, LoreMetadata> LoreNotes);
     private sealed record LevelEntry(string Name, long DataOffset, long DataLength, float OriginX, float OriginY, float OriginZ);
 }
