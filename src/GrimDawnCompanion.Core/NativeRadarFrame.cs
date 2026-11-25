@@ -10,13 +10,13 @@ public static class NativeRadarFrame
     private const int MaxLabelUtf8Bytes = 192;
 
     public static IReadOnlyList<string> Commands(ulong context, IEnumerable<NavigationOverlayPoint> points,
-        bool supportsTravelKind = true, string lane = "RADAR")
+        bool supportsTravelKind = true)
     {
         if (context == 0) throw new ArgumentOutOfRangeException(nameof(context));
         var markers = points.ToArray();
         if (markers.Length > 112) throw new ArgumentOutOfRangeException(nameof(points));
-        var commands = new List<string> { string.Create(CultureInfo.InvariantCulture, $"{lane}\tCANVAS\tBEGIN\t{context}\t{markers.Length}") };
-        var prefix = lane + "\tCANVAS\tADD";
+        var commands = new List<string> { string.Create(CultureInfo.InvariantCulture, $"RADAR\tCANVAS\tBEGIN\t{context}\t{markers.Length}") };
+        const string prefix = "RADAR\tCANVAS\tADD";
         var batch = prefix;
         foreach (var point in markers)
         {
@@ -43,7 +43,7 @@ public static class NativeRadarFrame
             batch += entry;
         }
         if (batch.Length > prefix.Length) commands.Add(batch);
-        commands.Add(lane + "\tCANVAS\tCOMMIT");
+        commands.Add("RADAR\tCANVAS\tCOMMIT");
         return commands;
     }
 
@@ -87,27 +87,38 @@ public static class NativeRadarFrame
     }
 }
 
-/// <summary>A live full-screen map render context; null when the map is hidden.</summary>
-public sealed record NativeMapFrame(ulong RenderContext)
+/// <summary>A coherent native render frame covering the corner minimap, the full-screen map, or both under one region/session context.</summary>
+public sealed record NativeRadarSurfaceFrame(MinimapGeometry? Minimap, bool FullMapOpen, ulong RenderContext)
 {
-    public static NativeMapFrame? Parse(string response)
+    public static NativeRadarSurfaceFrame? Parse(string response)
     {
-        if (response == "OK MAP_FRAME HIDDEN") return null;
-        var parts = response.Split(' ');
-        if (parts.Length != 4 || parts[0] != "OK" || parts[1] != "MAP_FRAME" || parts[2] != "OPEN" ||
-            !ulong.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var context) || context == 0)
-            throw new InvalidDataException("Invalid full-screen map frame.");
-        return new(context);
+        if (response == "OK RADAR_FRAME HIDDEN") return null;
+        var parts = response.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 4 && parts[0] == "OK" && parts[1] == "RADAR_FRAME" && parts[2] == "MAP")
+        {
+            if (!ulong.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var mapContext) || mapContext == 0)
+                throw new InvalidDataException("Invalid full-screen map render context.");
+            return new(null, true, mapContext);
+        }
+        if (parts.Length == 19 && parts[0] == "OK" && parts[1] == "RADAR_FRAME" && parts[2] == "MINIMAP" &&
+            (parts[3] == "0" || parts[3] == "1"))
+        {
+            var minimap = MinimapProjection.ParseFrame("OK MINIMAP_FRAME " + string.Join(" ", parts.Skip(4)))
+                ?? throw new InvalidDataException("Invalid radar minimap frame.");
+            if (minimap.RenderContext == 0) throw new InvalidDataException("Invalid radar render context.");
+            return new(minimap, parts[3] == "1", minimap.RenderContext);
+        }
+        throw new InvalidDataException("Invalid native radar frame.");
     }
 }
 
 public sealed record NativeRadarStatus(int Drawn, ulong AgeMilliseconds)
 {
     public bool Rendering => AgeMilliseconds < 500;
-    public static NativeRadarStatus Parse(string response, string lane = "RADAR_CANVAS")
+    public static NativeRadarStatus Parse(string response)
     {
         var fields = response.Split(' ');
-        if (fields.Length != 4 || fields[0] != "OK" || fields[1] != lane ||
+        if (fields.Length != 4 || fields[0] != "OK" || fields[1] != "RADAR_CANVAS" ||
             !int.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out var count) || count is < 0 or > 112 ||
             !ulong.TryParse(fields[3], NumberStyles.None, CultureInfo.InvariantCulture, out var age))
             throw new InvalidDataException("Invalid native radar status.");

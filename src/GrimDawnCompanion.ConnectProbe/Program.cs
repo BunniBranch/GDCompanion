@@ -1,6 +1,5 @@
 using GrimDawnCompanion.Core;
 using System.Diagnostics;
-using System.Globalization;
 using System.Runtime.InteropServices;
 
 var gameArgument = args.Length > 0 && !args[0].StartsWith('-') ? args[0] : null;
@@ -70,57 +69,9 @@ try
         _ = await client.UnloadAsync();
         return 0;
     }
-    if (args.Contains("--map-probe", StringComparer.OrdinalIgnoreCase))
-    {
-        if (!client.Capabilities.Contains("MAP_PROBE_V2"))
-        {
-            Console.WriteLine("NOTICE: the running game does not expose MAP_PROBE_V2.");
-            Console.WriteLine(client.Capabilities.Contains("MAP_PROBE")
-                ? "An older probe build is loaded."
-                : "Either the game is using an older bridge DLL, or the map-render hooks did not enable.");
-            Console.WriteLine($"Bridge file: {bridge} (last written {File.GetLastWriteTime(bridge):u})");
-            Console.WriteLine($"Handshake: {response}");
-            var released = await client.UnloadAsync();
-            Console.WriteLine(released
-                ? "The loaded bridge was unloaded; rerun --map-probe to load the current build."
-                : "The bridge did not confirm unload; fully exit Grim Dawn, restart it, load a character, and rerun.");
-            return 3;
-        }
-        var send = typeof(GameBridgeClient).GetMethod("SendAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
-        try
-        {
-            var position = await client.GetPlayerPositionAsync();
-            var armed = await (Task<string>)send.Invoke(client, [
-                string.Create(CultureInfo.InvariantCulture, $"MAP\tPROBE\tSTART\t{position.X:R}\t{position.Z:R}"),
-                CancellationToken.None])!;
-            Console.WriteLine("PROBE: " + armed);
-            Console.WriteLine("A magenta target is drawn at your character's world position on the game's map surface.");
-            Console.WriteLine("PHASE 1 (6 s): keep the full map closed and watch the minimap for the target.");
-            for (var index = 0; index < 6; index++)
-            {
-                await Task.Delay(1_000);
-                Console.WriteLine(await (Task<string>)send.Invoke(client, ["MAP\tPROBE\tSTATUS", CancellationToken.None])!);
-            }
-            Console.WriteLine("PHASE 2 (12 s): press M now and hold the full map open for the rest of the run.");
-            for (var index = 0; index < 12; index++)
-            {
-                await Task.Delay(1_000);
-                Console.WriteLine(await (Task<string>)send.Invoke(client, ["MAP\tPROBE\tSTATUS", CancellationToken.None])!);
-            }
-            Console.WriteLine(await (Task<string>)send.Invoke(client, ["MAP\tPROBE\tSTOP", CancellationToken.None])!);
-        }
-        finally
-        {
-            var released = await client.UnloadAsync(CancellationToken.None);
-            Console.WriteLine(released
-                ? "SUCCESS: bridge unloaded and disconnected"
-                : "NOTICE: bridge did not confirm unload");
-        }
-        return 0;
-    }
     if (args.Contains("--map-lane-test", StringComparer.OrdinalIgnoreCase))
     {
-        if (!client.Capabilities.Contains("MAP_CANVAS"))
+        if (!client.SupportsNativeMap)
         {
             Console.WriteLine("NOTICE: the running game does not expose MAP_CANVAS.");
             Console.WriteLine($"Handshake: {response}");
@@ -130,34 +81,28 @@ try
                 : "The bridge did not confirm unload; fully exit Grim Dawn, restart it, and rerun.");
             return 3;
         }
-        var send = typeof(GameBridgeClient).GetMethod("SendAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
-        async Task<string> Raw(string command) =>
-            await (Task<string>)send.Invoke(client, [command, CancellationToken.None])!;
         try
         {
             await client.SetRadarCaptureAsync(true, true);
             var position = await client.GetPlayerPositionAsync();
+            var marker = new NavigationOverlayPoint(
+                new WorldMarkerRecord("probe", "Riftgate", "probe://map", "probe://map",
+                    position.X, position.Y, position.Z, ["$live"], "Map Probe"),
+                0, 0, 0, false);
             Console.WriteLine($"PLAYER {position.X:R},{position.Z:R}; open the full map (M) and hold it open.");
             for (var index = 0; index < 20; index++)
             {
                 await Task.Delay(1_000);
-                var frame = await Raw("MAP\tFRAME");
-                var fields = frame.Split(' ');
-                if (fields.Length == 4 && fields[2] == "OPEN" && ulong.TryParse(fields[3], out var context) && context != 0)
+                var frame = await client.GetRadarFrameAsync();
+                if (frame is not null)
                 {
-                    var x = position.X.ToString("R", CultureInfo.InvariantCulture);
-                    var z = position.Z.ToString("R", CultureInfo.InvariantCulture);
-                    var begin = await Raw($"MAP\tCANVAS\tBEGIN\t{context}\t1");
-                    var add = await Raw($"MAP\tCANVAS\tADD\t{x},{z},3,4D41504C414E45");
-                    var commit = await Raw("MAP\tCANVAS\tCOMMIT");
-                    var lane = await Raw("MAP\tCANVAS\tSTATUS");
-                    var diag = await Raw("MAP\tCANVAS\tDIAG");
-                    Console.WriteLine($"{frame} | {begin} {add} {commit} | {lane} | {diag}");
+                    await client.SetNativeRadarFrameAsync(frame.RenderContext, [marker]);
+                    var status = await client.GetNativeRadarStatusAsync();
+                    Console.WriteLine($"CTX={frame.RenderContext} MINIMAP={frame.Minimap is not null} FULLMAP={frame.FullMapOpen} | DRAWN={status.Drawn} AGE={status.AgeMilliseconds}ms");
                 }
-                else Console.WriteLine(frame);
+                else Console.WriteLine("HIDDEN");
             }
-            Console.WriteLine("RADAR: " + await Raw("RADAR\tCANVAS\tSTATUS"));
-            Console.WriteLine("MAP CLEAR: " + await Raw("MAP\tCANVAS\tCLEAR"));
+            await client.ClearNativeRadarAsync();
         }
         finally
         {

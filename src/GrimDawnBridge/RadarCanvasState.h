@@ -85,18 +85,26 @@ namespace RadarCanvas
     inline bool Fresh(const Frame& frame, unsigned long long context, unsigned long long now)
     { return context && frame.context == context && frame.updated && now >= frame.updated && now - frame.updated < 1500; }
 
+    // Apply the captured 2D orthographic affine transform without rim clamping.
+    inline std::array<float, 2> ProjectRaw(const Marker& marker, const std::array<float, 8>& transform)
+    {
+        const float dx = marker.x - transform[0], dz = marker.z - transform[1];
+        return {
+            transform[2] + dx * transform[4] + dz * transform[6],
+            transform[3] + dx * transform[5] + dz * transform[7]
+        };
+    }
+
     // Apply the captured world-to-minimap transform and bounded rim clamping.
     inline std::array<float, 2> Project(const Marker& marker, const std::array<float, 8>& transform)
     {
-        const float dx = marker.x - transform[0], dz = marker.z - transform[1];
-        const float x = transform[2] + dx * transform[4] + dz * transform[6];
-        const float y = transform[3] + dx * transform[5] + dz * transform[7];
-        const float radius = hypotf(x, y);
+        const auto point = ProjectRaw(marker, transform);
+        const float radius = hypotf(point[0], point[1]);
         // Keep visible quest locations exact; only off-map directions use
         // the outer star lane. POIs retain their existing inner rim.
         const float scale = marker.kind == 0
             ? (radius > 1.f ? QuestEdgeRatio / radius : 1.f)
             : (radius > PoiEdgeRatio ? PoiEdgeRatio / radius : 1.f);
-        return { x * scale, y * scale };
+        return { point[0] * scale, point[1] * scale };
     }
 }

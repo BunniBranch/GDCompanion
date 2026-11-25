@@ -88,17 +88,19 @@ internal static class NativeRadarFrameRegressionTests
             !NativeRadarStatus.Parse("OK RADAR_CANVAS 12 500").Rendering,
             "native status reports actual recent drawing rather than queued targets");
         Reject(() => NativeRadarStatus.Parse("OK RADAR_CANVAS 113 10"));
-        var mapCommands = NativeRadarFrame.Commands(9, [point], lane: "MAP");
-        require(mapCommands.First() == "MAP\tCANVAS\tBEGIN\t9\t1" && mapCommands.Last() == "MAP\tCANVAS\tCOMMIT" &&
-            mapCommands.Skip(1).SkipLast(1).All(command => command.StartsWith("MAP\tCANVAS\tADD\t", StringComparison.Ordinal)),
-            "full map lane reuses the selected markers under its own command prefix");
-        require(NativeMapFrame.Parse("OK MAP_FRAME HIDDEN") is null &&
-            NativeMapFrame.Parse("OK MAP_FRAME OPEN 77") is { RenderContext: 77 },
-            "map frame parser distinguishes a hidden map from an open map render");
-        Reject(() => NativeMapFrame.Parse("OK MAP_FRAME OPEN 0"));
-        Reject(() => NativeMapFrame.Parse("OK MAP_FRAME 77"));
-        require(NativeRadarStatus.Parse("OK MAP_CANVAS 4 20", "MAP_CANVAS") is { Drawn: 4, Rendering: true },
-            "map status reports drawing on the full map lane");
+        require(NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME HIDDEN") is null &&
+            NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME MAP 77") is { Minimap: null, FullMapOpen: true, RenderContext: 77 },
+            "unified radar frame parser distinguishes hidden from full-map-only renders");
+        var minimapAndMap = NativeRadarSurfaceFrame.Parse(
+            "OK RADAR_FRAME MINIMAP 1 1735 43 174 174 1920 1080 100 200 0 0 0.05 0 0 0.05 88");
+        var minimapOnly = NativeRadarSurfaceFrame.Parse(
+            "OK RADAR_FRAME MINIMAP 0 1735 43 174 174 1920 1080 100 200 0 0 0.05 0 0 0.05 89");
+        require(minimapAndMap is { Minimap.RenderContext: 88, FullMapOpen: true, RenderContext: 88 } &&
+            minimapOnly is { Minimap.RenderContext: 89, FullMapOpen: false, RenderContext: 89 },
+            "unified radar frame parser carries minimap geometry, full-map flag, and shared render context");
+        Reject(() => NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME MAP 0"));
+        Reject(() => NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME MINIMAP 2 1735 43 174 174 1920 1080 100 200 0 0 0.05 0 0 0.05 88"));
+        Reject(() => NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME MINIMAP 0 1735 43 174 174 1920 1080 100 200 0 0 0.05 0 0 0.05 0"));
         var client = new GameBridgeClient();
         try
         {

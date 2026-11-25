@@ -342,33 +342,15 @@ public sealed partial class GameBridgeClient : IAsyncDisposable
     public async Task<NativeRadarStatus> GetNativeRadarStatusAsync(CancellationToken cancellationToken = default) =>
         NativeRadarStatus.Parse(await SendAsync("RADAR\tCANVAS\tSTATUS", cancellationToken));
 
-    public async Task<NativeMapFrame?> GetMapFrameAsync(CancellationToken cancellationToken = default)
+    public async Task<NativeRadarSurfaceFrame?> GetRadarFrameAsync(CancellationToken cancellationToken = default)
     {
-        if (!SupportsNativeMap) return null;
-        return NativeMapFrame.Parse(await SendAsync("MAP\tFRAME", cancellationToken));
+        if (SupportsNativeMap)
+            return NativeRadarSurfaceFrame.Parse(await SendAsync("RADAR\tFRAME", cancellationToken));
+        var minimap = await GetMinimapFrameAsync(cancellationToken);
+        return minimap?.Projection is not null && minimap.RenderContext != 0
+            ? new NativeRadarSurfaceFrame(minimap, false, minimap.RenderContext)
+            : null;
     }
-
-    public async Task SetNativeMapFrameAsync(ulong context, IEnumerable<NavigationOverlayPoint> points,
-        CancellationToken cancellationToken = default)
-    {
-        EnsureCapability("MAP_CANVAS");
-        foreach (var command in NativeRadarFrame.Commands(context, points,
-                     Capabilities.Contains("RADAR_CANVAS_TRAVEL"), "MAP"))
-        {
-            var response = await SendAsync(command, cancellationToken);
-            if (response != "OK MAP_CANVAS") throw new InvalidOperationException(response);
-        }
-    }
-
-    public async Task ClearNativeMapAsync(CancellationToken cancellationToken = default)
-    {
-        if (!SupportsNativeMap) return;
-        var response = await SendAsync("MAP\tCANVAS\tCLEAR", cancellationToken);
-        if (response != "OK MAP_CANVAS") throw new InvalidOperationException(response);
-    }
-
-    public async Task<NativeRadarStatus> GetNativeMapStatusAsync(CancellationToken cancellationToken = default) =>
-        NativeRadarStatus.Parse(await SendAsync("MAP\tCANVAS\tSTATUS", cancellationToken), "MAP_CANVAS");
 
     public async Task<IReadOnlySet<string>?> GetRestoredShrineUidsAsync(CancellationToken cancellationToken = default) =>
         (await GetRestoredShrineStateAsync(cancellationToken))?.Uids;

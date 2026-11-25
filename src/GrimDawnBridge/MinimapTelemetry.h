@@ -1,6 +1,5 @@
 #pragma once
 #include "MinimapProjection.h"
-#include "MapProbe.h"
 
 // Observe, but never modify, the game's compass texture draws. Stock artwork
 // contains transparent padding: circular rims are260/371 and174/247 pixels.
@@ -29,14 +28,15 @@ namespace MinimapTelemetry
     inline std::array<float, 6> projectedBounds{};
     inline unsigned int canvasOffsetX = 0, canvasOffsetY = 0;
     inline bool available = false;
-    inline unsigned long long frameContext = 0;
-    inline unsigned long long nextFrameContext = 0;
-    inline void* lastFrameRegion = nullptr;
+    inline unsigned long long renderContext = 0;
+    inline unsigned long long nextRenderContext = 0;
+    inline unsigned long long lastRenderAt = 0;
+    inline void* lastRenderRegion = nullptr;
+    inline bool mapValid = false;
+    inline unsigned long long mapSampledAt = 0;
     using FrameCallback = void(*)(void*, const std::array<float, 6>&, const std::array<float, 8>&, unsigned long long);
     inline std::atomic<FrameCallback> onFrame{nullptr};
-    inline unsigned long long mapContext = 0, nextMapContext = 0, mapSampledAt = 0;
-    inline bool mapWasOpen = false;
-    using MapCallback = void(*)(void*, unsigned long long);
+    using MapCallback = void(*)(void*, const std::array<float, 8>&, unsigned long long);
     inline std::atomic<MapCallback> onMapFrame{nullptr};
 
     inline void ObserveTexture(const void* resource, const void* texture)
@@ -86,87 +86,69 @@ namespace MinimapTelemetry
         sampledAt = GetTickCount64();
         ReleaseSRWLockExclusive(&lock);
     }
-    // Absolute render-pixel position of a global world point during a map
-    // render. The camera projects region-local coordinates, so remove the
-    // region origin first, then apply the same offsets as the minimap sample.
-    inline bool ProjectGlobal(float worldX, float worldZ, const void* canvas, float& screenX, float& screenY)
-    {
-        if (!MinimapProjection::available || !MinimapProjection::currentMap ||
-            !MinimapProjection::currentOffset || !canvas) return false;
-        __try
-        {
-            const auto map = static_cast<const unsigned char*>(MinimapProjection::currentMap);
-            const auto region = *reinterpret_cast<const unsigned char* const*>(map + 0x1C0);
-            if (!region) return false;
-            int offsetX = 0, offsetZ = 0;
-            memcpy(&offsetX, region + 0x3c, sizeof(offsetX));
-            memcpy(&offsetZ, region + 0x44, sizeof(offsetZ));
-            const float local[3]{ worldX - static_cast<float>(offsetX), 0, worldZ - static_cast<float>(offsetZ) };
-            float projected[2]{};
-            MinimapProjection::project(map + 0x170, projected, local, map + 0x1C8);
-            const auto canvasBytes = static_cast<const unsigned char*>(canvas);
-            const float translationX = *reinterpret_cast<const float*>(canvasBytes + canvasOffsetX);
-            const float translationY = *reinterpret_cast<const float*>(canvasBytes + canvasOffsetY);
-            screenX = projected[0] + *reinterpret_cast<const float*>(map + 0xAC4) +
-                MinimapProjection::currentOffset[0] + translationX;
-            screenY = projected[1] + *reinterpret_cast<const float*>(map + 0xAC8) +
-                MinimapProjection::currentOffset[1] + translationY;
-            return std::isfinite(screenX) && std::isfinite(screenY);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-    }
     // The compass artwork is a sibling UI draw, outside the map's render call.
-    // Sample its stable bounds separately, but project all reference points at
-    // the end of the map render and publish them as one immutable frame.
+    // Sample its stable bounds separately, then project one 3-point affine
+    // basis at the end of either the corner minimap or full-screen map pass
+    // under a single unified region/session renderContext.
     inline void ObserveMap(void* canvas)
     {
+        if (!canvas) return;
         std::array<float, 6> frameBounds{};
         AcquireSRWLockShared(&lock);
         frameBounds = bounds;
         const bool fresh = sampledAt != 0 && GetTickCount64() - sampledAt < 150;
         ReleaseSRWLockShared(&lock);
         std::array<float, 8> transform{};
+        void* minimapRegion = nullptr;
+        void* mapRegion = nullptr;
         const float offsetX = *reinterpret_cast<const float*>(static_cast<unsigned char*>(canvas) + canvasOffsetX);
         const float offsetY = *reinterpret_cast<const float*>(static_cast<unsigned char*>(canvas) + canvasOffsetY);
-        const bool valid = fresh && MinimapProjection::Sample(frameBounds[0], frameBounds[1], frameBounds[2], offsetX, offsetY, transform);
-        const auto region = valid ? MinimapProjection::Field<void*>(MinimapProjection::currentMap, 0x1C0) : nullptr;
+        const bool minimapValid = fresh &&
+            MinimapProjection::Sample(frameBounds[0], frameBounds[1], frameBounds[2], offsetX, offsetY, transform, &minimapRegion);
+        const bool mapValidNow = !minimapValid &&
+            MinimapProjection::SampleMap(offsetX, offsetY, transform, &mapRegion);
+        void* const activeRegion = minimapValid ? minimapRegion : (mapValidNow ? mapRegion : nullptr);
         AcquireSRWLockExclusive(&lock);
         const auto now = GetTickCount64();
-        if (valid && (!projectionValid || region != lastFrameRegion || now - projectedAt > 300 || frameBounds != projectedBounds))
-            frameContext = ++nextFrameContext;
-        if (!valid) frameContext = 0;
-        const auto context = frameContext;
-        lastFrameRegion = region;
-        projectedBounds = frameBounds;
-        projection = transform;
-        projectionValid = valid;
-        projectedAt = now;
-        ReleaseSRWLockExclusive(&lock);
-        const auto callback = onFrame.load(std::memory_order_acquire);
-        if (valid && callback) callback(canvas, frameBounds, transform, context);
-        // The full-screen map shares this render call but has no compass bounds.
-        // Track it separately so the map lane can draw in absolute pixels.
-        // The enabled byte is only clear during the map's own canvas pass, so this
-        // is true for a slice of each frame and false between passes. Hold the map
-        // open across those gaps or every render would mint a new context.
-        const bool mapRendering = MinimapProjection::MapOpen();
-        AcquireSRWLockExclusive(&lock);
-        if (mapRendering)
+        if (activeRegion)
         {
-            if (!mapWasOpen) mapContext = ++nextMapContext;
-            mapWasOpen = true;
+            const bool minimapBoundsChanged = minimapValid && projectionValid && frameBounds != projectedBounds;
+            if (renderContext == 0 || activeRegion != lastRenderRegion || now - lastRenderAt > 300 || minimapBoundsChanged)
+                renderContext = ++nextRenderContext;
+            lastRenderRegion = activeRegion;
+            lastRenderAt = now;
+        }
+        else if (lastRenderAt != 0 && now - lastRenderAt > 300)
+        {
+            renderContext = 0;
+            projectionValid = false;
+            mapValid = false;
+            lastRenderRegion = nullptr;
+        }
+        if (minimapValid)
+        {
+            projectedBounds = frameBounds;
+            projection = transform;
+            projectionValid = true;
+            projectedAt = now;
+        }
+        if (mapValidNow)
+        {
+            mapValid = true;
             mapSampledAt = now;
         }
-        else if (mapWasOpen && now - mapSampledAt > 250)
-            mapWasOpen = false;
-        if (!mapWasOpen) mapContext = 0;
-        const auto currentMapContext = mapContext;
+        const auto context = renderContext;
         ReleaseSRWLockExclusive(&lock);
-        const auto mapCallback = onMapFrame.load(std::memory_order_acquire);
-        if (mapRendering && mapCallback) mapCallback(canvas, currentMapContext);
-        // The diagnostic probe runs on every map render, including renders for
-        // which no compass frame was found. It never affects radar state.
-        MapProbe::Render(canvas, canvasOffsetX, canvasOffsetY, valid);
+        if (minimapValid)
+        {
+            const auto callback = onFrame.load(std::memory_order_acquire);
+            if (callback) callback(canvas, frameBounds, transform, context);
+        }
+        else if (mapValidNow)
+        {
+            const auto mapCallback = onMapFrame.load(std::memory_order_acquire);
+            if (mapCallback) mapCallback(canvas, transform, context);
+        }
     }
     inline void __fastcall RectHook(void* canvas, const void* first, const void* second,
         const void* texture, const void* shader, const void* name, const void* color, float value)
@@ -221,22 +203,25 @@ namespace MinimapTelemetry
         ReleaseSRWLockShared(&lock);
         return fresh;
     }
-    inline bool ReadMapFrame(unsigned long long& context)
+    inline bool ReadRadarFrame(bool& minimapOpen, bool& mapOpen, std::array<float, 6>& result,
+        std::array<float, 8>& transform, unsigned long long& context)
     {
         AcquireSRWLockShared(&lock);
-        context = mapContext;
-        const bool fresh = mapContext != 0 && mapSampledAt != 0 && GetTickCount64() - mapSampledAt < 150;
+        const auto now = GetTickCount64();
+        minimapOpen = projectionValid && projectedAt != 0 && now - projectedAt < 150 &&
+            sampledAt != 0 && now - sampledAt < 150 && bounds == projectedBounds;
+        mapOpen = mapValid && mapSampledAt != 0 && now - mapSampledAt < 150;
+        context = (minimapOpen || mapOpen) ? renderContext : 0;
+        if (minimapOpen) { result = projectedBounds; transform = projection; }
         ReleaseSRWLockShared(&lock);
-        return fresh;
+        return context != 0;
     }
     inline bool ReadFrame(std::array<float, 6>& result, std::array<float, 8>& transform, unsigned long long* context = nullptr)
     {
-        AcquireSRWLockShared(&lock);
-        result = projectedBounds; transform = projection;
-        if (context) *context = frameContext;
-        const bool fresh = projectionValid && projectedAt != 0 && GetTickCount64() - projectedAt < 150 &&
-            sampledAt != 0 && GetTickCount64() - sampledAt < 150 && bounds == projectedBounds;
-        ReleaseSRWLockShared(&lock);
-        return fresh;
+        bool minimapOpen = false, mapOpen = false;
+        unsigned long long current = 0;
+        ReadRadarFrame(minimapOpen, mapOpen, result, transform, current);
+        if (context) *context = minimapOpen ? current : 0;
+        return minimapOpen;
     }
 }
