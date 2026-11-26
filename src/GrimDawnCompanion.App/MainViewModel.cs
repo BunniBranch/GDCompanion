@@ -30,12 +30,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _navigationActive;
     private string _navigationStatusText = "Connect to Grim Dawn to enable temporary map markers.";
 
-    public ObservableCollection<ItemRecord> Items { get; } = [];
+    private readonly BulkObservableCollection<ItemRecord> _items = [];
+    private readonly BulkObservableCollection<ItemRecord> _blueprints = [];
+    public ObservableCollection<ItemRecord> Items => _items;
     public ObservableCollection<string> Categories { get; } = ["All Categories"];
     public ObservableCollection<string> Sources { get; } = ["All Content"];
     public ICollectionView ItemsView { get; }
     public ObservableCollection<SymbolVerification> Symbols { get; } = [];
-    public ObservableCollection<ItemRecord> Blueprints { get; } = [];
+    public ObservableCollection<ItemRecord> Blueprints => _blueprints;
     public ObservableCollection<QuestTokenRecord> QuestTokens { get; } = [];
     public ObservableCollection<PositionBookmark> PositionBookmarks { get; } = [];
     public ICollectionView BlueprintsView { get; }
@@ -105,13 +107,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void SetCatalog(CatalogDocument document)
     {
         AffixIndex=new(document.AffixRecords);
-        Items.Clear();
-        foreach (var item in document.Items) Items.Add(item);
-        Blueprints.Clear();
-        foreach (var item in document.Items)
-        {
-            if (item.Category == "Blueprints") Blueprints.Add(item);
-        }
+        _items.ReplaceAll(document.Items);
+        _blueprints.ReplaceAll(document.Items.Where(item => item.Category == "Blueprints"));
         Categories.Clear(); Categories.Add("All Categories");
         foreach (var value in document.Items.Select(x => x.Category).Distinct().Order()) Categories.Add(value);
         Sources.Clear(); Sources.Add("All Content");
@@ -170,4 +167,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
     private void OnPropertyChanged([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    private sealed class BulkObservableCollection<T> : ObservableCollection<T>
+    {
+        private bool _suppressNotifications;
+
+        public void ReplaceAll(IEnumerable<T> items)
+        {
+            _suppressNotifications = true;
+            try
+            {
+                Items.Clear();
+                foreach (var item in items) Items.Add(item);
+            }
+            finally
+            {
+                _suppressNotifications = false;
+            }
+            OnPropertyChanged(new PropertyChangedEventArgs("Count"));
+            OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+            OnCollectionChanged(new System.Collections.Specialized.NotifyCollectionChangedEventArgs(
+                System.Collections.Specialized.NotifyCollectionChangedAction.Reset));
+        }
+
+        protected override void OnCollectionChanged(System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+        {
+            if (!_suppressNotifications) base.OnCollectionChanged(e);
+        }
+    }
 }
