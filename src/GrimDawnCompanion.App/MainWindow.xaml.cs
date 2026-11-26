@@ -168,8 +168,8 @@ public partial class MainWindow : Window
                 SetStatus("Catalog loaded", $"{_document.Items.Count:N0} items available while updates are checked.", 0);
             }
             await VerifyCompatibilityAsync();
-            var installedFingerprint = await CatalogService.ComputeSourceFingerprintAsync(_game, _lifetime.Token);
-            if (_document is null || !string.Equals(_document.SourceFingerprint, installedFingerprint, StringComparison.OrdinalIgnoreCase))
+            if (_document is null || !string.Equals(_document.SourceFingerprint,
+                await CatalogService.ComputeSourceFingerprintAsync(_game, _lifetime.Token), StringComparison.OrdinalIgnoreCase))
                 await RebuildCatalogAsync(automatic: true);
             else
                 SetStatus("Ready", $"Catalog verified against the installed game • {_document.Items.Count:N0} items", 100);

@@ -62,7 +62,7 @@ public static class AffixLabels
     }
     private static bool Number(string value,out double n)=>double.TryParse(value,NumberStyles.Float,CultureInfo.InvariantCulture,out n) && double.IsFinite(n);
     private static string Signed(double n)=>(n>0 ? "+" : "")+n.ToString("0.##",CultureInfo.InvariantCulture);
-    private static readonly (string Field,string Label,bool Percent)[] StatLabels =
+    internal static readonly (string Field,string Label,bool Percent)[] StatLabels =
     [
         ("characterStrength","Physique",false),("characterDexterity","Cunning",false),("characterIntelligence","Spirit",false),
         ("characterStrengthModifier","Physique",true),("characterDexterityModifier","Cunning",true),("characterIntelligenceModifier","Spirit",true),

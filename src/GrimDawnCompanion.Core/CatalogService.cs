@@ -1,6 +1,7 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
+using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -12,12 +13,22 @@ public sealed partial class CatalogService
     public const int CurrentSchema = 6;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly string _cacheDirectory;
-    private readonly string? _workDirectory;
+
+    private static readonly Dictionary<string, int> StatIndexByField = AffixLabels.StatLabels
+        .Select((stat, index) => (stat.Field, index))
+        .ToDictionary(x => x.Field, x => x.index, StringComparer.Ordinal);
+
+    private static readonly string[] ExcludedSubstrings =
+    [
+        "/lootaffixes/", "/loottables/", "/lootchests/", "/dropfx/", "/itemskills/", "/controllers/",
+        "/merchants/", "/randomizers/", "/transmuters/", "/dynamictables/", "/ui/", "/lootsets/",
+        "/skills/", "records/skills/", "records/fx/", "/proxies/", "/loottable", "/lorechest"
+    ];
 
     public CatalogService(string? cacheDirectory = null, string? workDirectory = null)
     {
         _cacheDirectory = cacheDirectory ?? CompanionDataPaths.DirectoryPath;
-        _workDirectory = workDirectory;
+        _ = workDirectory;
     }
 
     public string CachePath => Path.Combine(_cacheDirectory, "catalog.json");
@@ -44,16 +55,17 @@ public sealed partial class CatalogService
 
     public static async Task<string> ComputeSourceFingerprintAsync(GameInstallation game, CancellationToken cancellationToken = default)
     {
-        var sources = new List<CatalogSource>();
-        foreach (var archive in GameLocator.GetInstalledArchives(game))
+        var archives = GameLocator.GetInstalledArchives(game);
+        var sources = new CatalogSource[archives.Count];
+        await Task.Run(() => Parallel.For(0, archives.Count, new ParallelOptions { CancellationToken = cancellationToken }, i =>
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var databaseHash = await Task.Run(() => Hashing.Sha256File(archive.DatabasePath), cancellationToken);
+            var archive = archives[i];
+            var databaseHash = Hashing.Sha256File(archive.DatabasePath);
             string? textHash = null;
             if (archive.TextPath is { } text && File.Exists(text) && new FileInfo(text).Length > 2048)
-                textHash = await Task.Run(() => Hashing.Sha256File(text), cancellationToken);
-            sources.Add(new(archive.Id, archive.DisplayName, databaseHash, textHash));
-        }
+                textHash = Hashing.Sha256File(text);
+            sources[i] = new(archive.Id, archive.DisplayName, databaseHash, textHash);
+        }), cancellationToken);
         return SourceFingerprint(sources);
     }
 
@@ -63,100 +75,129 @@ public sealed partial class CatalogService
         IProgress<CatalogProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(game.ArchiveToolPath)) throw new FileNotFoundException("Grim Dawn ArchiveTool.exe was not found.", game.ArchiveToolPath);
         var archives = GameLocator.GetInstalledArchives(game);
-        if (archives.Count == 0) throw new InvalidOperationException("No installed Grim Dawn databases were found.");
+        if (archives.Count == 0)
+            throw new FileNotFoundException("No installed Grim Dawn databases were found.", Path.Combine(game.RootDirectory, "database", "database.arz"));
 
-        var sources = new List<CatalogSource>();
-        var tags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        progress?.Report(new("Reading localized item names", 0, archives.Count, "Opening Text_EN archives"));
-        for (var i = 0; i < archives.Count; i++)
+        progress?.Report(new("Reading game databases", 0, archives.Count, $"Loading {archives.Count} installed archives"));
+
+        var loaded = new LoadedArchive[archives.Count];
+        var loadedCount = 0;
+        await Task.Run(() => Parallel.For(0, archives.Count, new ParallelOptions { CancellationToken = cancellationToken }, i =>
         {
-            cancellationToken.ThrowIfCancellationRequested();
             var archive = archives[i];
-            var databaseHash = await Task.Run(() => Hashing.Sha256File(archive.DatabasePath), cancellationToken);
+            var rawBytes = File.ReadAllBytes(archive.DatabasePath);
+            var databaseHash = Convert.ToHexString(SHA256.HashData(rawBytes));
+
             string? textHash = null;
+            Dictionary<string, string>? archiveTags = null;
             if (archive.TextPath is { } textPath && File.Exists(textPath) && new FileInfo(textPath).Length > 2048)
             {
-                textHash = await Task.Run(() => Hashing.Sha256File(textPath), cancellationToken);
-                var loaded = await Task.Run(() => ArcReader.ReadTags(textPath), cancellationToken);
-                foreach (var pair in loaded) tags[pair.Key] = pair.Value;
+                textHash = Hashing.Sha256File(textPath);
+                archiveTags = ArcReader.ReadTags(textPath);
             }
-            sources.Add(new(archive.Id, archive.DisplayName, databaseHash, textHash));
-            progress?.Report(new("Reading localized item names", i + 1, archives.Count, archive.DisplayName));
+
+            var reader = ArzReader.Parse(rawBytes, archive.DisplayName);
+            var keyMetas = ClassifyStringTable(reader);
+            loaded[i] = new LoadedArchive(archive, databaseHash, textHash, archiveTags, reader, keyMetas);
+
+            var done = Interlocked.Increment(ref loadedCount);
+            progress?.Report(new("Reading game databases", done, archives.Count, archive.DisplayName));
+        }), cancellationToken);
+
+        var sources = new List<CatalogSource>(loaded.Length);
+        var tags = new Dictionary<string, string>(65536, StringComparer.OrdinalIgnoreCase);
+        var totalRecords = 0;
+        for (var i = 0; i < loaded.Length; i++)
+        {
+            var item = loaded[i];
+            sources.Add(new(item.Archive.Id, item.Archive.DisplayName, item.DatabaseSha256, item.TextSha256));
+            if (item.Tags is not null)
+            {
+                foreach (var pair in item.Tags)
+                    tags[pair.Key] = pair.Value;
+            }
+            totalRecords += item.Reader.Records.Length;
         }
 
-        var workRoot = GetArchiveToolSafeWorkDirectory(_workDirectory);
-        Directory.CreateDirectory(workRoot);
-        var records = new Dictionary<string, ItemRecord>(StringComparer.OrdinalIgnoreCase);
-        var affixRecords = new Dictionary<string, AffixCatalogRecord>(StringComparer.OrdinalIgnoreCase);
-        var skillNames = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-        var questAssociations = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-        var navigationRecords = new Dictionary<string, QuestNavigationRecord>(StringComparer.OrdinalIgnoreCase);
-        try
+        if (totalRecords == 0)
+            throw new InvalidOperationException("Installed Grim Dawn databases contained no DBR records.");
+
+        progress?.Report(new("Indexing items", 0, totalRecords, $"Scanning {totalRecords:N0} database records"));
+
+        const int ChunkSize = 256;
+        var workItems = new List<(int ArchiveIndex, int Start, int End)>(totalRecords / ChunkSize + loaded.Length);
+        for (var a = 0; a < loaded.Length; a++)
         {
-            for (var archiveIndex = 0; archiveIndex < archives.Count; archiveIndex++)
+            var count = loaded[a].Reader.Records.Length;
+            for (var start = 0; start < count; start += ChunkSize)
+                workItems.Add((a, start, Math.Min(start + ChunkSize, count)));
+        }
+
+        var perArchiveOutputs = new ConcurrentBag<ArchiveParseOutput>[loaded.Length];
+        for (var i = 0; i < loaded.Length; i++) perArchiveOutputs[i] = [];
+
+        var processedRecords = 0;
+        await Task.Run(() => Parallel.ForEach(
+            workItems,
+            new ParallelOptions { CancellationToken = cancellationToken },
+            () => (LocalOutputs: new ArchiveParseOutput?[loaded.Length], Scratch: new byte[65536]),
+            (work, _, state) =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var archive = archives[archiveIndex];
-                var extractDirectory = Path.Combine(workRoot, "Source" + archiveIndex);
-                SafeDeleteDirectory(extractDirectory, workRoot);
-                Directory.CreateDirectory(extractDirectory);
-                progress?.Report(new("Extracting game database", archiveIndex, archives.Count, archive.DisplayName));
-                await ExtractDatabaseAsync(game, archive, extractDirectory, archiveIndex, archives.Count, progress, cancellationToken);
-
-                var files = Directory.EnumerateFiles(extractDirectory, "*.dbr", SearchOption.AllDirectories).ToArray();
-                if (files.Length == 0)
-                    throw new InvalidOperationException($"ArchiveTool produced no DBR records for {archive.DisplayName}. Its output path may be incompatible.");
-
-                var parsed = new ConcurrentBag<ItemRecord>();
-                var parsedAffixes = new ConcurrentBag<AffixCatalogRecord>();
-                var parsedSkillNames = new ConcurrentBag<KeyValuePair<string,string>>();
-                var parsedQuestAssociations = new ConcurrentBag<(string RecordPath, string QuestPath)>();
-                var parsedNavigation = new ConcurrentBag<QuestNavigationRecord>();
-                var done = 0;
-                await Task.Run(() => Parallel.ForEach(files, new ParallelOptions { CancellationToken = cancellationToken }, file =>
+                var archive = loaded[work.ArchiveIndex];
+                var output = state.LocalOutputs[work.ArchiveIndex];
+                if (output is null)
                 {
-                    var item = TryParseItem(file, extractDirectory, archive.DisplayName, tags);
-                    if (item is not null) parsed.Add(item);
-                    // ReadLines opens its reader before enumeration; parsers that
-                    // reject a record early can otherwise keep extraction files locked.
-                    var lines=File.ReadAllLines(file);
-                    if(AffixLabels.ReadSkillName(Path.GetRelativePath(extractDirectory,file),lines,tags) is { } skillName) parsedSkillNames.Add(skillName);
-                    var affix=ItemAffixIndex.ReadRecord(Path.GetRelativePath(extractDirectory,file),lines,tags);
-                    if(affix is not null) parsedAffixes.Add(affix);
-                    foreach (var association in ReadQuestAssociations(file, extractDirectory))
-                        parsedQuestAssociations.Add(association);
-                    var navigation = QuestNavigationIndex.ReadRecord(Path.GetRelativePath(extractDirectory, file), lines, tags);
-                    if (navigation is not null) parsedNavigation.Add(navigation);
-                    var current = Interlocked.Increment(ref done);
-                    if (current % 750 == 0)
-                        progress?.Report(new("Indexing items", current, files.Length, archive.DisplayName));
-                }), cancellationToken);
-                foreach (var item in parsed) records[item.RecordPath] = item;
-                foreach(var record in parsedAffixes) affixRecords[record.RecordPath]=record;
-                foreach(var pair in parsedSkillNames) skillNames[pair.Key]=pair.Value;
-                foreach (var record in parsedNavigation) navigationRecords[record.RecordPath] = record;
-                foreach (var (recordPath, questPath) in parsedQuestAssociations)
+                    output = new ArchiveParseOutput();
+                    state.LocalOutputs[work.ArchiveIndex] = output;
+                }
+
+                for (var r = work.Start; r < work.End; r++)
+                    ProcessRecord(archive, r, tags, ref state.Scratch, output);
+
+                var current = Interlocked.Add(ref processedRecords, work.End - work.Start);
+                if (current == totalRecords || (current / 2048) != ((current - (work.End - work.Start)) / 2048))
+                    progress?.Report(new("Indexing items", current, totalRecords, archive.Archive.DisplayName));
+                return state;
+            },
+            state =>
+            {
+                for (var i = 0; i < loaded.Length; i++)
+                {
+                    if (state.LocalOutputs[i] is { } local)
+                        perArchiveOutputs[i].Add(local);
+                }
+            }), cancellationToken);
+
+        var records = new Dictionary<string, ItemRecord>(16384, StringComparer.OrdinalIgnoreCase);
+        var affixRecords = new Dictionary<string, RawAffixRecord>(16384, StringComparer.OrdinalIgnoreCase);
+        var skillNames = new Dictionary<string, string>(8192, StringComparer.OrdinalIgnoreCase);
+        var questAssociations = new Dictionary<string, HashSet<string>>(2048, StringComparer.OrdinalIgnoreCase);
+        var navigationRecords = new Dictionary<string, QuestNavigationRecord>(8192, StringComparer.OrdinalIgnoreCase);
+
+        for (var i = 0; i < loaded.Length; i++)
+        {
+            foreach (var part in perArchiveOutputs[i])
+            {
+                foreach (var item in part.Items) records[item.RecordPath] = item;
+                foreach (var affix in part.Affixes) affixRecords[affix.RecordPath] = affix;
+                foreach (var skill in part.SkillNames) skillNames[skill.Key] = skill.Value;
+                foreach (var nav in part.NavigationRecords) navigationRecords[nav.RecordPath] = nav;
+                foreach (var (recordPath, questPath) in part.QuestAssociations)
                 {
                     if (!questAssociations.TryGetValue(recordPath, out var paths))
                         questAssociations[recordPath] = paths = new(StringComparer.OrdinalIgnoreCase);
                     paths.Add(questPath);
                 }
-                progress?.Report(new("Indexing items", files.Length, files.Length, $"{archive.DisplayName}: {parsed.Count:N0} candidates"));
-                SafeDeleteDirectory(extractDirectory, workRoot);
             }
-        }
-        finally
-        {
-            try { SafeDeleteDirectory(workRoot, Path.GetDirectoryName(workRoot)!); } catch { }
         }
 
         var ordered = records.Values
             .OrderBy(x => x.Name, StringComparer.CurrentCultureIgnoreCase)
             .ThenBy(x => x.RecordPath, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        if (ordered.Count < 1_000) throw new InvalidOperationException($"Catalog validation failed: only {ordered.Count:N0} items were identified.");
+        if (ordered.Count < 1_000)
+            throw new InvalidOperationException($"Catalog validation failed: only {ordered.Count:N0} items were identified.");
 
         var document = new CatalogDocument
         {
@@ -164,13 +205,17 @@ public sealed partial class CatalogService
             GeneratedAt = DateTimeOffset.UtcNow,
             Sources = sources,
             Items = ordered,
-            AffixRecords = affixRecords.Values.Select(r=>AffixLabels.Resolve(r,skillNames)).OrderBy(r=>r.RecordPath,StringComparer.Ordinal).ToList(),
+            AffixRecords = affixRecords.Values
+                .Select(r => ResolveAffix(r, skillNames))
+                .OrderBy(r => r.RecordPath, StringComparer.Ordinal)
+                .ToList(),
             QuestNavigationRecords = navigationRecords,
             QuestRecordAssociations = questAssociations.ToDictionary(
                 pair => pair.Key,
                 pair => pair.Value.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray(),
                 StringComparer.OrdinalIgnoreCase),
         };
+
         var destination = outputPath ?? CachePath;
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(destination))!);
         var temporary = destination + ".new";
@@ -181,90 +226,539 @@ public sealed partial class CatalogService
         return document;
     }
 
-    private static async Task ExtractDatabaseAsync(
-        GameInstallation game, GameArchive archive, string outputDirectory,
-        int archiveIndex, int archiveCount, IProgress<CatalogProgress>? progress, CancellationToken cancellationToken)
+    private static KeyMeta[] ClassifyStringTable(ArzReader reader)
     {
-        var start = new ProcessStartInfo
+        var metas = new KeyMeta[reader.StringCount];
+        for (uint i = 0; i < reader.StringCount; i++)
+            metas[i] = ClassifyKey(reader.GetStringBytes(i));
+        return metas;
+    }
+
+    private static KeyMeta ClassifyKey(ReadOnlySpan<byte> keyBytes)
+    {
+        if (keyBytes.Length == 0 || keyBytes.Length > 64) return default;
+        if (keyBytes.IndexOfAny("/\\. "u8) >= 0) return default;
+
+        Span<char> charBuf = stackalloc char[keyBytes.Length];
+        for (var i = 0; i < keyBytes.Length; i++) charBuf[i] = (char)keyBytes[i];
+        ReadOnlySpan<char> chars = charBuf;
+
+        if (chars.Equals("Class", StringComparison.Ordinal)) return new(KeyKind.Class, 0, 0);
+        if (chars.Equals("itemNameTag", StringComparison.Ordinal)) return new(KeyKind.ItemNameTag, 0, 0);
+        if (chars.Equals("description", StringComparison.OrdinalIgnoreCase))
+            return new(KeyKind.Description, (byte)(chars.Equals("description", StringComparison.Ordinal) ? 1 : 0), 0);
+        if (chars.Equals("AreaDescription", StringComparison.OrdinalIgnoreCase)) return new(KeyKind.AreaDescription, 0, 0);
+        if (chars.Equals("itemClassification", StringComparison.Ordinal)) return new(KeyKind.ItemClassification, 0, 0);
+        if (chars.Equals("itemLevel", StringComparison.Ordinal)) return new(KeyKind.ItemLevel, 0, 0);
+        if (chars.Equals("templateName", StringComparison.OrdinalIgnoreCase))
+            return new(KeyKind.TemplateName, (byte)(chars.Equals("templateName", StringComparison.Ordinal) ? 1 : 0), 0);
+        if (chars.Equals("skillDisplayName", StringComparison.Ordinal)) return new(KeyKind.SkillDisplayName, 0, 0);
+        if (chars.Equals("buffSkillName", StringComparison.Ordinal)) return new(KeyKind.BuffSkillName, 0, 0);
+        if (chars.Equals("onAddToWorld", StringComparison.OrdinalIgnoreCase)) return new(KeyKind.OnAddToWorld, 0, 0);
+        if (chars.Equals("lootRandomizerName", StringComparison.Ordinal)) return new(KeyKind.LootRandomizerName, 0, 0);
+        if (chars.Equals("levelRequirement", StringComparison.Ordinal)) return new(KeyKind.LevelRequirement, 0, 0);
+        if (chars.Equals("itemSkillName", StringComparison.Ordinal) || chars.Equals("itemSkillAutoController", StringComparison.Ordinal))
+            return new(KeyKind.ItemSkillName, 0, 0);
+
+        if (chars.StartsWith("questFile", StringComparison.OrdinalIgnoreCase))
+            return new(KeyKind.QuestFile, 0, 0);
+        if (chars.StartsWith("taskUID", StringComparison.OrdinalIgnoreCase))
+            return new(KeyKind.TaskUid, 0, 0);
+
+        if (TryMatchAffixKey(chars, out var isWeight, out var group, out var index))
+            return new(isWeight ? KeyKind.AffixWeight : KeyKind.AffixLink, group, index);
+
+        if (chars.StartsWith("augmentSkillName", StringComparison.Ordinal) && TryParseDigits(chars[16..], out var augIdx))
+            return new(KeyKind.AugmentSkillName, 0, augIdx);
+        if (chars.StartsWith("augmentSkillLevel", StringComparison.Ordinal) && TryParseDigits(chars[17..], out var augLvlIdx))
+            return new(KeyKind.AugmentSkillLevel, 0, augLvlIdx);
+
+        if ((chars.StartsWith("modifiedSkillName", StringComparison.Ordinal) && AllDigits(chars[17..])) ||
+            (chars.StartsWith("skillModifierName", StringComparison.Ordinal) && AllDigits(chars[17..])))
+            return new(KeyKind.ModifiedSkillName, 0, 0);
+
+        if (IsPoolChild(chars)) return new(KeyKind.PoolChild, 0, 0);
+        if (IsPoolNameChild(chars)) return new(KeyKind.PoolNameChild, 0, 0);
+
+        if (chars[0] is 'c' or 'd' or 'o')
         {
-            FileName = game.ArchiveToolPath,
-            WorkingDirectory = game.RootDirectory,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        start.ArgumentList.Add(archive.DatabasePath);
-        start.ArgumentList.Add("-database");
-        start.ArgumentList.Add(outputDirectory);
-        using var process = new Process { StartInfo = start };
-        process.Start();
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        var maximumObserved = 0;
-        var lastReported = 0;
-        while (await process.StandardOutput.ReadLineAsync(cancellationToken) is { } line)
+            if (StatIndexByField.TryGetValue(new string(chars), out var statIndex))
+                return new(KeyKind.StatBonus, 0, (ushort)statIndex);
+        }
+
+        return default;
+    }
+
+    private static void ProcessRecord(
+        LoadedArchive archive,
+        int recordIndex,
+        IReadOnlyDictionary<string, string> tags,
+        ref byte[] scratchBuffer,
+        ArchiveParseOutput output)
+    {
+        var reader = archive.Reader;
+        ref readonly var header = ref reader.Records[recordIndex];
+        if (header.NameId >= reader.StringCount) return;
+
+        var relativePath = NormalizePath(reader.GetStringBytes(header.NameId));
+        var checkItem = IsItemRecordLocation(relativePath) && !IsExcluded(relativePath);
+        var rawData = reader.ReadRecordData(in header, ref scratchBuffer);
+
+        string className = "", nameTag = "", descriptionTag = "", areaDescriptionTag = "", classification = "", template = "";
+        string? descriptionExact = null;
+        string? templateExact = null;
+        var itemLevel = 0;
+
+        string? skillResolved = null;
+        string? skillChild = null;
+        string? onAddToWorld = null;
+        string? lootRandomizerNameTag = null;
+        var levelRequirement = 0;
+
+        List<(string Suffix, string Value)>? questFiles = null;
+        Dictionary<string, uint>? taskUids = null;
+        List<string>? poolChildren = null;
+        List<string>? poolNameChildren = null;
+
+        List<(string Key, byte Group, ushort Index, string Value)>? affixLinks = null;
+        Dictionary<int, double>? affixWeights = null;
+        List<(string Field, int Index, string Path)>? augmentSkillNames = null;
+        Dictionary<int, double>? augmentSkillLevels = null;
+        List<(int StatIndex, double Value)>? statBonuses = null;
+        List<(bool IsGrants, string Path)>? skillRefs = null;
+
+        var keyMetas = archive.KeyMetas;
+        var stringCount = reader.StringCount;
+
+        var fc = 0;
+        var limit = rawData.Length - 8;
+        while (fc <= limit)
         {
-            var match = ArchiveProgressRegex().Match(line);
-            if (match.Success && int.TryParse(match.Groups[1].Value, out var current) && int.TryParse(match.Groups[2].Value, out var total))
+            var dataType = BinaryPrimitives.ReadUInt16LittleEndian(rawData.Slice(fc, 2));
+            var valueCount = BinaryPrimitives.ReadUInt16LittleEndian(rawData.Slice(fc + 2, 2));
+            var keyId = BinaryPrimitives.ReadUInt32LittleEndian(rawData.Slice(fc + 4, 4));
+            fc += 8;
+            var valueBytes = valueCount * 4;
+            if (fc + valueBytes > rawData.Length) break;
+
+            if (keyId < stringCount && valueCount > 0)
             {
-                maximumObserved = Math.Max(maximumObserved, current);
-                if (maximumObserved == total || maximumObserved - lastReported >= 100)
+                var meta = keyMetas[keyId];
+                if (meta.Kind != KeyKind.None)
                 {
-                    lastReported = maximumObserved;
-                    progress?.Report(new($"Extracting {archive.DisplayName}", maximumObserved, total, $"Database {archiveIndex + 1} of {archiveCount}"));
+                    switch (meta.Kind)
+                    {
+                        case KeyKind.Class:
+                            if (dataType == 2) className = ReadStringValue(reader, rawData, fc, valueCount);
+                            break;
+                        case KeyKind.ItemNameTag:
+                            if (dataType == 2) nameTag = ReadStringValue(reader, rawData, fc, valueCount);
+                            break;
+                        case KeyKind.Description:
+                            if (dataType == 2)
+                            {
+                                var value = ReadStringValue(reader, rawData, fc, valueCount);
+                                descriptionTag = value;
+                                if (meta.Group == 1) descriptionExact = value;
+                            }
+                            break;
+                        case KeyKind.AreaDescription:
+                            if (dataType == 2) areaDescriptionTag = ReadStringValue(reader, rawData, fc, valueCount);
+                            break;
+                        case KeyKind.ItemClassification:
+                            if (dataType == 2) classification = ReadStringValue(reader, rawData, fc, valueCount);
+                            break;
+                        case KeyKind.ItemLevel:
+                            itemLevel = ReadIntValue(rawData, fc, dataType);
+                            break;
+                        case KeyKind.TemplateName:
+                            if (dataType == 2)
+                            {
+                                var value = ReadStringValue(reader, rawData, fc, valueCount);
+                                template = value;
+                                if (meta.Group == 1) templateExact = value;
+                            }
+                            break;
+                        case KeyKind.SkillDisplayName:
+                            if (dataType == 2)
+                            {
+                                var tag = ReadStringValue(reader, rawData, fc, valueCount).Trim();
+                                skillResolved = tags.TryGetValue(tag, out var name) ? AffixLabels.Clean(name) : "";
+                            }
+                            break;
+                        case KeyKind.BuffSkillName:
+                            if (dataType == 2)
+                                skillChild = AffixLabels.Normalize(ReadStringValue(reader, rawData, fc, valueCount).Trim());
+                            break;
+                        case KeyKind.QuestFile:
+                            if (dataType == 2)
+                            {
+                                var value = ReadStringValue(reader, rawData, fc, valueCount)
+                                    .Replace('\\', '/').Trim().TrimStart('/').ToLowerInvariant();
+                                if (value.EndsWith(".qst", StringComparison.Ordinal))
+                                {
+                                    output.QuestAssociations.Add((relativePath, value));
+                                    questFiles ??= [];
+                                    questFiles.Add((reader.GetString(keyId)[9..], value));
+                                }
+                            }
+                            break;
+                        case KeyKind.TaskUid:
+                            {
+                                long uid = dataType switch
+                                {
+                                    0 or 3 => BinaryPrimitives.ReadInt32LittleEndian(rawData.Slice(fc, 4)),
+                                    1 => (long)BitConverter.UInt32BitsToSingle(BinaryPrimitives.ReadUInt32LittleEndian(rawData.Slice(fc, 4))),
+                                    2 => long.TryParse(ReadStringValue(reader, rawData, fc, valueCount).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0,
+                                    _ => 0
+                                };
+                                if (uid != 0)
+                                {
+                                    taskUids ??= new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+                                    taskUids[reader.GetString(keyId)[7..]] = unchecked((uint)uid);
+                                }
+                            }
+                            break;
+                        case KeyKind.PoolChild:
+                            if (dataType == 2)
+                            {
+                                var value = ReadStringValue(reader, rawData, fc, valueCount).Trim();
+                                if (value.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    poolChildren ??= [];
+                                    poolChildren.Add(QuestNavigationIndex.Normalize(value));
+                                }
+                            }
+                            break;
+                        case KeyKind.PoolNameChild:
+                            if (dataType == 2)
+                            {
+                                var value = ReadStringValue(reader, rawData, fc, valueCount).Trim();
+                                if (value.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    poolNameChildren ??= [];
+                                    poolNameChildren.Add(QuestNavigationIndex.Normalize(value));
+                                }
+                            }
+                            break;
+                        case KeyKind.OnAddToWorld:
+                            if (dataType == 2)
+                                onAddToWorld = ReadStringValue(reader, rawData, fc, valueCount).Trim();
+                            break;
+                        case KeyKind.LootRandomizerName:
+                            if (dataType == 2)
+                                lootRandomizerNameTag = ReadStringValue(reader, rawData, fc, valueCount).Trim();
+                            break;
+                        case KeyKind.LevelRequirement:
+                            levelRequirement = ReadIntValue(rawData, fc, dataType);
+                            break;
+                        case KeyKind.AffixLink:
+                            if (dataType == 2)
+                            {
+                                var value = ReadStringValue(reader, rawData, fc, valueCount).Trim();
+                                if (value.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    affixLinks ??= [];
+                                    affixLinks.Add((reader.GetString(keyId), meta.Group, meta.Index, value.Replace('\\', '/').ToLowerInvariant()));
+                                }
+                            }
+                            break;
+                        case KeyKind.AffixWeight:
+                            {
+                                var weight = ReadDoubleValue(rawData, fc, dataType);
+                                if (weight > 0)
+                                {
+                                    affixWeights ??= [];
+                                    affixWeights[(meta.Group << 16) | meta.Index] = weight;
+                                }
+                            }
+                            break;
+                        case KeyKind.AugmentSkillName:
+                            if (dataType == 2)
+                            {
+                                augmentSkillNames ??= [];
+                                augmentSkillNames.Add((reader.GetString(keyId), meta.Index, ReadStringValue(reader, rawData, fc, valueCount).Trim()));
+                            }
+                            break;
+                        case KeyKind.AugmentSkillLevel:
+                            {
+                                var level = ReadDoubleValue(rawData, fc, dataType);
+                                if (double.IsFinite(level) && level != 0)
+                                {
+                                    augmentSkillLevels ??= [];
+                                    augmentSkillLevels[meta.Index] = level;
+                                }
+                            }
+                            break;
+                        case KeyKind.ItemSkillName:
+                            if (dataType == 2)
+                            {
+                                var value = ReadStringValue(reader, rawData, fc, valueCount).Trim();
+                                if (value.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    skillRefs ??= [];
+                                    skillRefs.Add((true, value));
+                                }
+                            }
+                            break;
+                        case KeyKind.ModifiedSkillName:
+                            if (dataType == 2)
+                            {
+                                var value = ReadStringValue(reader, rawData, fc, valueCount).Trim();
+                                if (value.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    skillRefs ??= [];
+                                    skillRefs.Add((false, value));
+                                }
+                            }
+                            break;
+                        case KeyKind.StatBonus:
+                            {
+                                var value = ReadDoubleValue(rawData, fc, dataType);
+                                if (double.IsFinite(value) && value != 0)
+                                {
+                                    statBonuses ??= [];
+                                    statBonuses.Add((meta.Index, value));
+                                }
+                            }
+                            break;
+                    }
+                }
+            }
+            fc += valueBytes;
+        }
+
+        if (checkItem)
+        {
+            var tmpl = templateExact ?? "";
+            if (relativePath.StartsWith("records/items/", StringComparison.Ordinal) || LooksSpawnable(className, tmpl))
+            {
+                var desc = descriptionExact ?? "";
+                var displayTag = !string.IsNullOrWhiteSpace(nameTag) ? nameTag : desc;
+                var hasName = tags.TryGetValue(displayTag, out var localized) && !string.IsNullOrWhiteSpace(CleanMarkup(localized));
+                var name = hasName ? CleanMarkup(localized!) : Humanize(Path.GetFileNameWithoutExtension(relativePath));
+                if (string.IsNullOrWhiteSpace(name)) name = relativePath;
+                output.Items.Add(InternalGearLabels.Apply(
+                    new(name, relativePath, archive.Archive.DisplayName, CategoryFor(relativePath, className),
+                        classification, itemLevel, displayTag, className)
+                    { NameUnavailable = !hasName }));
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(skillResolved))
+            output.SkillNames.Add(new(relativePath, skillResolved));
+        else if (skillChild?.EndsWith(".dbr", StringComparison.Ordinal) == true)
+            output.SkillNames.Add(new(relativePath, skillChild));
+        else if (skillResolved is not null)
+            output.SkillNames.Add(new(relativePath, ""));
+
+        if (className == "LootRandomizer" || className == "LootRandomizerTable" || className.StartsWith("LootItemTable", StringComparison.Ordinal))
+        {
+            var links = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (affixLinks is not null && affixWeights is not null)
+            {
+                foreach (var (key, group, idx, val) in affixLinks)
+                {
+                    if (affixWeights.ContainsKey((group << 16) | idx))
+                        links[key] = val;
+                }
+            }
+            var rawName = lootRandomizerNameTag is not null && tags.TryGetValue(lootRandomizerNameTag, out var localizedAffix) ? localizedAffix : "";
+            rawName = MarkupRegex().Replace(rawName, "");
+            output.Affixes.Add(new RawAffixRecord
+            {
+                RecordPath = relativePath,
+                Class = className,
+                Name = rawName,
+                Level = levelRequirement,
+                Classification = classification,
+                Links = links,
+                AugmentSkillNames = className == "LootRandomizer" ? augmentSkillNames : null,
+                AugmentSkillLevels = className == "LootRandomizer" ? augmentSkillLevels : null,
+                StatBonuses = className == "LootRandomizer" ? statBonuses : null,
+                SkillRefs = className == "LootRandomizer" ? skillRefs : null,
+            });
+        }
+
+        List<QuestTargetBinding>? bindings = null;
+        if (questFiles is not null && taskUids is not null)
+        {
+            foreach (var (suffix, questPath) in questFiles)
+            {
+                if (taskUids.TryGetValue(suffix, out var uid) && uid != 0)
+                {
+                    bindings ??= [];
+                    bindings.Add(new(questPath, uid));
                 }
             }
         }
-        await process.WaitForExitAsync(cancellationToken);
-        var stderr = await stderrTask;
-        if (process.ExitCode != 0) throw new InvalidOperationException($"ArchiveTool failed for {archive.DisplayName} (exit {process.ExitCode}). {stderr}".Trim());
+        var kind = className;
+        if (kind.Length == 0 && QuestNavigationIndex.Normalize(template).EndsWith("/proxypool.tpl", StringComparison.Ordinal))
+            kind = "ProxyPool";
+        List<string>? children = null;
+        if (kind.Equals("Proxy", StringComparison.OrdinalIgnoreCase)) children = poolChildren;
+        else if (kind.Equals("ProxyPool", StringComparison.OrdinalIgnoreCase)) children = poolNameChildren;
+        var onAdd = kind.Equals("ScriptEntity", StringComparison.OrdinalIgnoreCase) ? onAddToWorld : null;
+        if (bindings is { Count: > 0 } || children is { Count: > 0 } || !string.IsNullOrWhiteSpace(onAdd))
+        {
+            var navTag = descriptionTag.Length > 0 ? descriptionTag : areaDescriptionTag;
+            output.NavigationRecords.Add(new QuestNavigationRecord(
+                relativePath,
+                tags.GetValueOrDefault(navTag),
+                bindings is not null ? bindings.Distinct().ToArray() : [],
+                children is not null ? children.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() : [],
+                onAdd));
+        }
     }
 
-    private static ItemRecord? TryParseItem(string file, string extractionRoot, string source, IReadOnlyDictionary<string, string> tags)
+    private static AffixCatalogRecord ResolveAffix(RawAffixRecord record, IReadOnlyDictionary<string, string> skills)
     {
-        var relative = Path.GetRelativePath(extractionRoot, file).Replace('\\', '/').ToLowerInvariant();
-        if (!IsItemRecordLocation(relative) || IsExcluded(relative)) return null;
-        string className = "", nameTag = "", descriptionTag = "", classification = "", template = "";
-        var itemLevel = 0;
-        using var reader = new StreamReader(file, Encoding.UTF8, true, 4096);
-        while (reader.ReadLine() is { } line)
+        if (record.Class != "LootRandomizer")
+            return new(record.RecordPath, record.Class, record.Name, record.Level, record.Classification, record.Links);
+
+        var effects = new List<string>();
+        if (record.AugmentSkillNames is not null && record.AugmentSkillLevels is not null)
         {
-            var comma = line.IndexOf(',');
-            if (comma <= 0) continue;
-            var key = line[..comma];
-            var end = line.LastIndexOf(',');
-            var value = end > comma ? line[(comma + 1)..end] : line[(comma + 1)..];
-            switch (key)
+            foreach (var (_, idx, path) in record.AugmentSkillNames.OrderBy(x => x.Field, StringComparer.Ordinal))
             {
-                case "Class": className = value; break;
-                case "itemNameTag": nameTag = value; break;
-                case "description": descriptionTag = value; break;
-                case "itemClassification": classification = value; break;
-                case "itemLevel": int.TryParse(value.Split('.')[0], out itemLevel); break;
-                case "templateName": template = value; break;
+                if (record.AugmentSkillLevels.TryGetValue(idx, out var n) && n != 0)
+                    effects.Add($"{Signed(n)} to {Skill(path)}");
             }
         }
-        if (!relative.StartsWith("records/items/", StringComparison.Ordinal) && !LooksSpawnable(className, template)) return null;
-        var displayTag = !string.IsNullOrWhiteSpace(nameTag) ? nameTag : descriptionTag;
-        var hasName = tags.TryGetValue(displayTag, out var localized) && !string.IsNullOrWhiteSpace(CleanMarkup(localized));
-        var name = hasName ? CleanMarkup(localized!) : Humanize(Path.GetFileNameWithoutExtension(relative));
-        if (string.IsNullOrWhiteSpace(name)) name = relative;
-        return InternalGearLabels.Apply(new(name, relative, source, CategoryFor(relative, className), classification, itemLevel, displayTag, className) {NameUnavailable=!hasName});
+        if (record.StatBonuses is not null)
+        {
+            var statValues = new double[AffixLabels.StatLabels.Length];
+            foreach (var (statIndex, value) in record.StatBonuses)
+                statValues[statIndex] = value;
+            for (var i = 0; i < AffixLabels.StatLabels.Length; i++)
+            {
+                if (statValues[i] != 0)
+                    effects.Add($"{Signed(statValues[i])}{(AffixLabels.StatLabels[i].Percent ? "%" : "")} {AffixLabels.StatLabels[i].Label}");
+            }
+        }
+        if (record.SkillRefs is not null)
+        {
+            foreach (var (isGrants, path) in record.SkillRefs)
+                effects.Add((isGrants ? "Grants " : "Modifies ") + Skill(path));
+        }
+
+        var description = string.Join("; ", effects.Distinct());
+        var name = AffixLabels.Clean(record.Name);
+        if (string.IsNullOrWhiteSpace(name))
+            name = effects.Count > 0 ? string.Join("; ", effects.Distinct().Take(2)) : "Special equipment bonus";
+        return new(record.RecordPath, record.Class, name, record.Level, record.Classification, record.Links) { Description = description };
+
+        string Skill(string path)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var depth = 0; depth < 12; depth++)
+            {
+                path = AffixLabels.Normalize(path);
+                if (!seen.Add(path) || !skills.TryGetValue(path, out var resolved) || string.IsNullOrWhiteSpace(resolved)) break;
+                if (!resolved.EndsWith(".dbr", StringComparison.OrdinalIgnoreCase)) return resolved;
+                path = resolved;
+            }
+            return "an unnamed skill";
+        }
     }
 
-    private static IEnumerable<(string RecordPath, string QuestPath)> ReadQuestAssociations(string file, string extractionRoot)
+    private static string ReadStringValue(ArzReader reader, ReadOnlySpan<byte> rawData, int offset, int valueCount)
     {
-        var recordPath = Path.GetRelativePath(extractionRoot, file).Replace('\\', '/').ToLowerInvariant();
-        foreach (var line in File.ReadLines(file))
+        if (valueCount == 1)
         {
-            var comma = line.IndexOf(',');
-            if (comma <= 0 || !line[..comma].StartsWith("questFile", StringComparison.OrdinalIgnoreCase)) continue;
-            var end = line.LastIndexOf(',');
-            var value = (end > comma ? line[(comma + 1)..end] : line[(comma + 1)..])
-                .Replace('\\', '/').Trim().TrimStart('/').ToLowerInvariant();
-            if (value.EndsWith(".qst", StringComparison.OrdinalIgnoreCase))
-                yield return (recordPath, value);
+            var id = BinaryPrimitives.ReadUInt32LittleEndian(rawData.Slice(offset, 4));
+            return id < reader.StringCount ? reader.GetString(id) : "";
         }
+        var builder = new StringBuilder();
+        for (var i = 0; i < valueCount; i++)
+        {
+            if (i > 0) builder.Append(';');
+            var id = BinaryPrimitives.ReadUInt32LittleEndian(rawData.Slice(offset + i * 4, 4));
+            if (id < reader.StringCount) builder.Append(reader.GetString(id));
+        }
+        return builder.ToString();
+    }
+
+    private static int ReadIntValue(ReadOnlySpan<byte> rawData, int offset, ushort dataType) => dataType switch
+    {
+        0 or 3 => BinaryPrimitives.ReadInt32LittleEndian(rawData.Slice(offset, 4)),
+        1 => (int)BitConverter.UInt32BitsToSingle(BinaryPrimitives.ReadUInt32LittleEndian(rawData.Slice(offset, 4))),
+        _ => 0
+    };
+
+    private static double ReadDoubleValue(ReadOnlySpan<byte> rawData, int offset, ushort dataType) => dataType switch
+    {
+        0 or 3 => BinaryPrimitives.ReadInt32LittleEndian(rawData.Slice(offset, 4)),
+        1 => BitConverter.UInt32BitsToSingle(BinaryPrimitives.ReadUInt32LittleEndian(rawData.Slice(offset, 4))),
+        _ => 0
+    };
+
+    private static string NormalizePath(ReadOnlySpan<byte> raw)
+    {
+        Span<char> buffer = raw.Length <= 512 ? stackalloc char[raw.Length] : new char[raw.Length];
+        for (var i = 0; i < raw.Length; i++)
+        {
+            var b = raw[i];
+            if (b == (byte)'\\') buffer[i] = '/';
+            else if (b is >= (byte)'A' and <= (byte)'Z') buffer[i] = (char)(b + 32);
+            else buffer[i] = (char)b;
+        }
+        return new string(buffer);
+    }
+
+    private static bool TryParseDigits(ReadOnlySpan<char> value, out ushort result)
+    {
+        result = 0;
+        if (value.Length == 0 || value.Length > 4) return false;
+        for (var i = 0; i < value.Length; i++)
+            if (value[i] is < '0' or > '9') return false;
+        return ushort.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out result);
+    }
+
+    private static bool AllDigits(ReadOnlySpan<char> value)
+    {
+        for (var i = 0; i < value.Length; i++)
+            if (value[i] is < '0' or > '9') return false;
+        return true;
+    }
+
+    private static bool TryMatchAffixKey(ReadOnlySpan<char> chars, out bool isWeight, out byte group, out ushort index)
+    {
+        isWeight = false; group = 0; index = 0;
+        ReadOnlySpan<char> rest;
+        if (chars.StartsWith("lootName", StringComparison.Ordinal)) { group = 0; rest = chars[8..]; }
+        else if (chars.StartsWith("lootWeight", StringComparison.Ordinal)) { isWeight = true; group = 0; rest = chars[10..]; }
+        else if (chars.StartsWith("randomizerName", StringComparison.Ordinal)) { group = 1; rest = chars[14..]; }
+        else if (chars.StartsWith("randomizerWeight", StringComparison.Ordinal)) { isWeight = true; group = 1; rest = chars[16..]; }
+        else if (chars.StartsWith("prefixTableName", StringComparison.Ordinal)) { group = 2; rest = chars[15..]; }
+        else if (chars.StartsWith("prefixTableWeight", StringComparison.Ordinal)) { isWeight = true; group = 2; rest = chars[17..]; }
+        else if (chars.StartsWith("suffixTableName", StringComparison.Ordinal)) { group = 3; rest = chars[15..]; }
+        else if (chars.StartsWith("suffixTableWeight", StringComparison.Ordinal)) { isWeight = true; group = 3; rest = chars[17..]; }
+        else if (chars.StartsWith("rarePrefixTableName", StringComparison.Ordinal)) { group = 4; rest = chars[19..]; }
+        else if (chars.StartsWith("rarePrefixTableWeight", StringComparison.Ordinal)) { isWeight = true; group = 4; rest = chars[21..]; }
+        else if (chars.StartsWith("rareSuffixTableName", StringComparison.Ordinal)) { group = 5; rest = chars[19..]; }
+        else if (chars.StartsWith("rareSuffixTableWeight", StringComparison.Ordinal)) { isWeight = true; group = 5; rest = chars[21..]; }
+        else return false;
+
+        if (rest.Length is < 1 or > 4 || rest[0] == '0') return false;
+        return TryParseDigits(rest, out index);
+    }
+
+    private static bool IsPoolChild(ReadOnlySpan<char> chars)
+    {
+        if (!chars.StartsWith("pool", StringComparison.OrdinalIgnoreCase)) return false;
+        var rest = chars[4..];
+        if (rest.StartsWith("Epic", StringComparison.OrdinalIgnoreCase)) rest = rest[4..];
+        else if (rest.StartsWith("Legendary", StringComparison.OrdinalIgnoreCase)) rest = rest[9..];
+        return rest.Length > 0 && AllDigits(rest);
+    }
+
+    private static bool IsPoolNameChild(ReadOnlySpan<char> chars)
+    {
+        if (!chars.StartsWith("name", StringComparison.OrdinalIgnoreCase)) return false;
+        var rest = chars[4..];
+        if (rest.StartsWith("Champion", StringComparison.OrdinalIgnoreCase)) rest = rest[8..];
+        return rest.Length > 0 && AllDigits(rest);
     }
 
     private static bool LooksSpawnable(string className, string template)
@@ -291,12 +785,12 @@ public sealed partial class CatalogService
         path.StartsWith("records/endlessdungeon/", StringComparison.Ordinal) ||
         path.StartsWith("records/storyelements", StringComparison.Ordinal);
 
-    private static bool IsExcluded(string path) => new[]
+    private static bool IsExcluded(string path)
     {
-        "/lootaffixes/", "/loottables/", "/lootchests/", "/dropfx/", "/itemskills/", "/controllers/",
-        "/merchants/", "/randomizers/", "/transmuters/", "/dynamictables/", "/ui/", "/lootsets/",
-        "/skills/", "/itemskills/", "records/skills/", "records/fx/", "/proxies/", "/loottable", "/lorechest"
-    }.Any(path.Contains);
+        foreach (var excluded in ExcludedSubstrings)
+            if (path.Contains(excluded, StringComparison.Ordinal)) return true;
+        return false;
+    }
 
     private static string CategoryFor(string path, string className)
     {
@@ -313,43 +807,81 @@ public sealed partial class CatalogService
 
     private static string Humanize(string value)
     {
-        value = Regex.Replace(value, "^[a-z]+[0-9]*_", "", RegexOptions.IgnoreCase);
+        value = HumanizePrefixRegex().Replace(value, "");
         value = value.Replace('_', ' ').Replace('-', ' ').Trim();
-        return CultureInfoInvariantTitle(value);
+        return CultureInfo.InvariantCulture.TextInfo.ToTitleCase(value.ToLowerInvariant());
     }
 
-    private static string CultureInfoInvariantTitle(string value) =>
-        System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(value.ToLowerInvariant());
+    private static string Signed(double value) => (value > 0 ? "+" : "") + value.ToString("0.##", CultureInfo.InvariantCulture);
 
     private static string SourceFingerprint(IEnumerable<CatalogSource> sources) =>
         Hashing.CombineFingerprint(sources.SelectMany(x => new[] { x.Id, x.DatabaseSha256, x.TextSha256 ?? "" }));
 
     private static string CleanMarkup(string value) => ColorMarkupRegex().Replace(MarkupRegex().Replace(value, ""), "").Trim();
 
-    private static string GetArchiveToolSafeWorkDirectory(string? preferred)
+    private enum KeyKind : byte
     {
-        var path = preferred ?? Path.Combine(CompanionDataPaths.DirectoryPath, "CatalogWork");
-        Directory.CreateDirectory(path);
-        var buffer = new StringBuilder(1024);
-        if (GetShortPathName(path, buffer, buffer.Capacity) > 0) path = buffer.ToString();
-        if (path.Contains('.')) throw new InvalidOperationException("ArchiveTool cannot extract to a path containing a period. Move the application cache to a Windows profile path without periods.");
-        return path;
+        None = 0,
+        Class,
+        ItemNameTag,
+        Description,
+        AreaDescription,
+        ItemClassification,
+        ItemLevel,
+        TemplateName,
+        SkillDisplayName,
+        BuffSkillName,
+        QuestFile,
+        TaskUid,
+        PoolChild,
+        PoolNameChild,
+        OnAddToWorld,
+        LootRandomizerName,
+        LevelRequirement,
+        AffixLink,
+        AffixWeight,
+        AugmentSkillName,
+        AugmentSkillLevel,
+        ItemSkillName,
+        ModifiedSkillName,
+        StatBonus,
     }
 
-    private static void SafeDeleteDirectory(string target, string allowedParent)
+    private readonly record struct KeyMeta(KeyKind Kind, byte Group, ushort Index);
+
+    private sealed record LoadedArchive(
+        GameArchive Archive,
+        string DatabaseSha256,
+        string? TextSha256,
+        Dictionary<string, string>? Tags,
+        ArzReader Reader,
+        KeyMeta[] KeyMetas);
+
+    private sealed class ArchiveParseOutput
     {
-        if (!Directory.Exists(target)) return;
-        var fullTarget = Path.GetFullPath(target).TrimEnd(Path.DirectorySeparatorChar);
-        var fullParent = Path.GetFullPath(allowedParent).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!fullTarget.StartsWith(fullParent, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Refusing to delete a catalog path outside its work directory.");
-        Directory.Delete(fullTarget, true);
+        public List<ItemRecord> Items { get; } = [];
+        public List<RawAffixRecord> Affixes { get; } = [];
+        public List<KeyValuePair<string, string>> SkillNames { get; } = [];
+        public List<(string RecordPath, string QuestPath)> QuestAssociations { get; } = [];
+        public List<QuestNavigationRecord> NavigationRecords { get; } = [];
     }
 
-    [DllImport("kernel32.dll", EntryPoint = "GetShortPathNameW", CharSet = CharSet.Unicode)]
-    private static extern uint GetShortPathName(string longPath, StringBuilder shortPath, int bufferLength);
+    private sealed class RawAffixRecord
+    {
+        public required string RecordPath { get; init; }
+        public required string Class { get; init; }
+        public required string Name { get; init; }
+        public required int Level { get; init; }
+        public required string Classification { get; init; }
+        public required Dictionary<string, string> Links { get; init; }
+        public List<(string Field, int Index, string Path)>? AugmentSkillNames { get; init; }
+        public Dictionary<int, double>? AugmentSkillLevels { get; init; }
+        public List<(int StatIndex, double Value)>? StatBonuses { get; init; }
+        public List<(bool IsGrants, string Path)>? SkillRefs { get; init; }
+    }
 
-    [GeneratedRegex("^\\((\\d+)/(\\d+)\\)")]
-    private static partial Regex ArchiveProgressRegex();
+    [GeneratedRegex("^[a-z]+[0-9]*_", RegexOptions.IgnoreCase)]
+    private static partial Regex HumanizePrefixRegex();
     [GeneratedRegex("\\{[^}]+\\}")]
     private static partial Regex MarkupRegex();
     [GeneratedRegex("\\^[A-Za-z0-9]")]
