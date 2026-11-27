@@ -252,7 +252,8 @@
                     <Expander Header="POI Type Filter" Foreground="{StaticResource SecondaryText}" Margin="0,0,0,14" IsEnabled="{Binding IsChecked, ElementName=NavigationPoiBox}">
                       <WrapPanel x:Name="PoiTypesPanel" Margin="0,12,0,0">
                         <WrapPanel.Resources><Style TargetType="CheckBox"><Setter Property="Foreground" Value="{StaticResource PrimaryText}"/><Setter Property="Width" Value="180"/><Setter Property="Margin" Value="0,0,8,10"/></Style></WrapPanel.Resources>
-                        <CheckBox Content="Rifts &amp; travel utilities" Tag="Travel" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
+                        <CheckBox Content="Rifts" Tag="Riftgates" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
+                        <CheckBox Content="Travel utilities" Tag="Travel" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
                         <CheckBox Content="Vendors" Tag="Vendors" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
                         <CheckBox Content="Blacksmiths" Tag="Blacksmiths" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
                         <CheckBox Content="Spirit guides" Tag="SpiritGuides" Checked="NavigationFilterChanged" Unchecked="NavigationFilterChanged"/>
@@ -513,6 +514,13 @@
             <StackPanel>
               <TextBlock Text="Safety Model" FontSize="19" FontWeight="SemiBold"/>
               <TextBlock Text="Companion does not modify game archives. Catalogue updates only read installed data. The bridge loads on demand, communicates through a local Windows pipe and runs actions on the game's update thread. It has no stealth, persistence, networking or multiplayer support. Character-changing tools can still affect saves." Foreground="{StaticResource SecondaryText}" Margin="0,7,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource Card}" MaxWidth="850" HorizontalAlignment="Left" Margin="0,16,0,0">
+            <StackPanel>
+              <TextBlock Text="In-Game Radar" FontSize="19" FontWeight="SemiBold"/>
+              <TextBlock Text="Automatically enable the in-game radar when connecting to Grim Dawn, provided the navigation catalog is ready and at least one marker type is selected." Foreground="{StaticResource SecondaryText}" Margin="0,7,0,14" TextWrapping="Wrap"/>
+              <CheckBox x:Name="AutoEnableRadarBox" Content="Automatically Enable In-Game Radar When Connecting" IsChecked="False" Foreground="{StaticResource PrimaryText}" Checked="AutoEnableRadarChanged" Unchecked="AutoEnableRadarChanged"/>
             </StackPanel>
           </Border>
           <Border Style="{StaticResource Card}" MaxWidth="850" HorizontalAlignment="Left" Margin="0,16,0,0">

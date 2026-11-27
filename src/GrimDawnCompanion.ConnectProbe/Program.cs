@@ -2,14 +2,16 @@ using GrimDawnCompanion.Core;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-var game = GameLocator.Locate(args.Length > 0 ? args[0] : null)
+var gameArgument = args.Length > 0 && !args[0].StartsWith('-') ? args[0] : null;
+var bridgeArgument = args.Length > 1 && !args[1].StartsWith('-') ? args[1] : null;
+var game = GameLocator.Locate(gameArgument)
     ?? throw new InvalidOperationException($"Grim Dawn {(Environment.Is64BitProcess ? "x64" : "x86")} installation was not found.");
-var bridge = args.Length > 1
-    ? Path.GetFullPath(args[1])
+var bridge = bridgeArgument is not null
+    ? Path.GetFullPath(bridgeArgument)
     : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "GrimDawnBridge.dll"));
 
 Console.WriteLine($"Game:   {game.ExecutablePath}");
-Console.WriteLine($"Bridge: {bridge}");
+Console.WriteLine($"Bridge: {bridge} (last written {File.GetLastWriteTime(bridge):u})");
 
 if (args.Contains("--inspect-navigation-hooks", StringComparer.OrdinalIgnoreCase))
 {
@@ -65,6 +67,48 @@ try
             Console.WriteLine(await (Task<string>)send.Invoke(client, ["MINIMAP\tBOUNDS", CancellationToken.None])!);
         }
         _ = await client.UnloadAsync();
+        return 0;
+    }
+    if (args.Contains("--map-lane-test", StringComparer.OrdinalIgnoreCase))
+    {
+        if (!client.SupportsNativeMap)
+        {
+            Console.WriteLine("NOTICE: the running game does not expose MAP_CANVAS.");
+            Console.WriteLine($"Handshake: {response}");
+            var released = await client.UnloadAsync();
+            Console.WriteLine(released
+                ? "The loaded bridge was unloaded; rerun --map-lane-test to load the current build."
+                : "The bridge did not confirm unload; fully exit Grim Dawn, restart it, and rerun.");
+            return 3;
+        }
+        try
+        {
+            await client.SetRadarCaptureAsync(true, true);
+            var position = await client.GetPlayerPositionAsync();
+            var marker = new NavigationOverlayPoint(
+                new WorldMarkerRecord("probe", "Riftgate", "probe://map", "probe://map",
+                    position.X, position.Y, position.Z, ["$live"], "Map Probe"),
+                0, 0, 0, false);
+            Console.WriteLine($"PLAYER {position.X:R},{position.Z:R}; open the full map (M) and hold it open.");
+            for (var index = 0; index < 20; index++)
+            {
+                await Task.Delay(1_000);
+                var frame = await client.GetRadarFrameAsync();
+                if (frame is not null)
+                {
+                    await client.SetNativeRadarFrameAsync(frame.RenderContext, [marker]);
+                    var status = await client.GetNativeRadarStatusAsync();
+                    Console.WriteLine($"CTX={frame.RenderContext} MINIMAP={frame.Minimap is not null} FULLMAP={frame.FullMapOpen} | DRAWN={status.Drawn} AGE={status.AgeMilliseconds}ms");
+                }
+                else Console.WriteLine("HIDDEN");
+            }
+            await client.ClearNativeRadarAsync();
+        }
+        finally
+        {
+            var released = await client.UnloadAsync(CancellationToken.None);
+            Console.WriteLine(released ? "SUCCESS: bridge unloaded and disconnected" : "NOTICE: bridge did not confirm unload");
+        }
         return 0;
     }
     if (args.Contains("--status", StringComparer.OrdinalIgnoreCase))

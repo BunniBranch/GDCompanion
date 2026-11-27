@@ -33,6 +33,45 @@ internal static class NativeRadarFrameRegressionTests
         var label = new UTF8Encoding(false, true).GetString(bytes);
         require(bytes.Length <= 192 && label.StartsWith("Questname ") && !label.Contains('{'),
             "native hover labels strip markup and controls without splitting Unicode characters");
+        string DecodeLabel(NavigationOverlayPoint item)
+        {
+            var encodedLabel = NativeRadarFrame.Commands(9, [item])[1].Split('\t')[3].Split(',')[3];
+            return new UTF8Encoding(false, true).GetString(Convert.FromHexString(encodedLabel));
+        }
+        var riftPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("rift", "Riftgate", "records/ui/riftgatemap/locations/riftgatea_devilscrossing.dbr", "Levels/Region0A001.lvl", 10, 0, 20, DisplayName: "Devil's Crossing Rift"),
+            244.6, 0, 0, true);
+        require(DecodeLabel(riftPoint) == "Devil's Crossing Rift (245m)",
+            "native hover labels append rounded meter distance after POI name");
+        var spawnPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("spawn", "Quest Objective", "records/balthazar.dbr", "Levels/Region0A001.lvl", 10, 0, 20, DisplayName: "Balthazar", IsSpawnArea: true),
+            87.2, 0, 0, false);
+        require(DecodeLabel(spawnPoint) == "Balthazar (possible spawn area, 87m)",
+            "native hover labels combine spawn-area note and rounded meter distance");
+        var longPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("long", "Quest Objective", "records/long.dbr", "Levels/Region0A001.lvl", 10, 0, 20, DisplayName: new string('A', 60)),
+            312.4, 0, 0, false);
+        var longLabel = DecodeLabel(longPoint);
+        require(longLabel.Length <= 48 && Encoding.UTF8.GetByteCount(longLabel) <= 192 && longLabel.EndsWith("\u2026 (312m)", StringComparison.Ordinal),
+            "native hover labels truncate oversized names while preserving distance suffix");
+        require(DecodeLabel(riftPoint with { Distance = double.NaN }) == "Devil's Crossing Rift" &&
+                DecodeLabel(riftPoint with { Distance = -5 }) == "Devil's Crossing Rift",
+            "native hover labels omit non-finite or negative distances");
+        string DecodeKind(NavigationOverlayPoint item, bool supportsTravelKind = true) =>
+            NativeRadarFrame.Commands(9, [item], supportsTravelKind)[1].Split('\t')[3].Split(',')[2];
+        var boatPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("boat", "Travel Utility", "records/interactive/boat.dbr", "Levels/Region0A010.lvl", 10, 0, 20, DisplayName: "Row Boat"),
+            10, 0, 0, false);
+        var liveBoatPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("live-boat", "Travel Utility", "live://minimap/20", "live://current-map", 10, 0, 20, ["$live"], "Row Boat"),
+            10, 0, 0, false);
+        var legacyLiveRiftPoint = new NavigationOverlayPoint(
+            new WorldMarkerRecord("live-rift", "Travel Utility", "live://minimap/3", "live://current-map", 10, 0, 20, ["$live"], "Riftgate"),
+            10, 0, 0, false);
+        require(DecodeKind(riftPoint) == "3" && DecodeKind(legacyLiveRiftPoint) == "3" &&
+                DecodeKind(boatPoint) == "7" && DecodeKind(liveBoatPoint) == "7" &&
+                DecodeKind(boatPoint, supportsTravelKind: false) == "3",
+            "native radar assigns distinct kinds to rifts and travel utilities with legacy bridge fallback");
         require(NativeRadarFrame.Commands(9, []).SequenceEqual(new[] { "RADAR\tCANVAS\tBEGIN\t9\t0", "RADAR\tCANVAS\tCOMMIT" }),
             "native empty frame explicitly clears previous targets");
         Reject(() => NativeRadarFrame.Commands(0, [point]));
@@ -49,6 +88,19 @@ internal static class NativeRadarFrameRegressionTests
             !NativeRadarStatus.Parse("OK RADAR_CANVAS 12 500").Rendering,
             "native status reports actual recent drawing rather than queued targets");
         Reject(() => NativeRadarStatus.Parse("OK RADAR_CANVAS 113 10"));
+        require(NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME HIDDEN") is null &&
+            NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME MAP 77") is { Minimap: null, FullMapOpen: true, RenderContext: 77 },
+            "unified radar frame parser distinguishes hidden from full-map-only renders");
+        var minimapAndMap = NativeRadarSurfaceFrame.Parse(
+            "OK RADAR_FRAME MINIMAP 1 1735 43 174 174 1920 1080 100 200 0 0 0.05 0 0 0.05 88");
+        var minimapOnly = NativeRadarSurfaceFrame.Parse(
+            "OK RADAR_FRAME MINIMAP 0 1735 43 174 174 1920 1080 100 200 0 0 0.05 0 0 0.05 89");
+        require(minimapAndMap is { Minimap.RenderContext: 88, FullMapOpen: true, RenderContext: 88 } &&
+            minimapOnly is { Minimap.RenderContext: 89, FullMapOpen: false, RenderContext: 89 },
+            "unified radar frame parser carries minimap geometry, full-map flag, and shared render context");
+        Reject(() => NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME MAP 0"));
+        Reject(() => NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME MINIMAP 2 1735 43 174 174 1920 1080 100 200 0 0 0.05 0 0 0.05 88"));
+        Reject(() => NativeRadarSurfaceFrame.Parse("OK RADAR_FRAME MINIMAP 0 1735 43 174 174 1920 1080 100 200 0 0 0.05 0 0 0.05 0"));
         var client = new GameBridgeClient();
         try
         {
@@ -58,6 +110,13 @@ internal static class NativeRadarFrameRegressionTests
             require(client.SupportsNativeRadar, "verified native radar requires projection and canvas capabilities");
             typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.ProtocolVersion))!.SetValue(client, 30);
             require(!client.SupportsNativeRadar, "old bridge cannot activate native fullscreen rendering");
+            typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.ProtocolVersion))!.SetValue(client, 40);
+            require(!client.SupportsNativeMap, "map lane needs the map capability, not just the radar one");
+            typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.Capabilities))!.SetValue(client,
+                new HashSet<string> { "MINIMAP", "MINIMAP_PROJECTION", "RADAR_CANVAS", "MAP_CANVAS" });
+            require(client.SupportsNativeMap, "verified map lane requires the full-screen map capability");
+            typeof(GameBridgeClient).GetProperty(nameof(GameBridgeClient.ProtocolVersion))!.SetValue(client, 39);
+            require(!client.SupportsNativeMap, "old bridge cannot draw on the full-screen map");
         }
         finally { client.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }

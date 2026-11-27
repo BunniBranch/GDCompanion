@@ -156,6 +156,8 @@ public static class ArcReader
             throw new InvalidDataException("ARC entry size does not match its parts.");
     }
 
+    internal static byte[] DecompressBlock(byte[] input, int expected) => Decompress(input, expected);
+
     private static byte[] Decompress(byte[] input, int expected)
     {
         try { return Lz4Block(input, expected); }
@@ -204,11 +206,280 @@ public static class ArcReader
                 do { if (si >= source.Length) throw new InvalidDataException(); extra = source[si++]; length += extra; } while (extra == 255);
             }
             if (di + length > output.Length) throw new InvalidDataException();
-            for (var j = 0; j < length; j++) output[di + j] = output[di + j - distance];
+            if (distance >= length)
+                output.AsSpan(di - distance, length).CopyTo(output.AsSpan(di, length));
+            else
+                for (var j = 0; j < length; j++) output[di + j] = output[di + j - distance];
             di += length;
         }
         if (di != expected) throw new InvalidDataException($"LZ4 output was {di} bytes; expected {expected}.");
         return output;
+    }
+
+    internal sealed class IndexedEntryDescriptor
+    {
+        public string ArcPath { get; }
+        public Part[] Parts { get; }
+        public long[] VirtualStarts { get; }
+        public long Length { get; }
+
+        private IndexedEntryDescriptor(string arcPath, Part[] parts, long[] virtualStarts, long length)
+        {
+            ArcPath = arcPath;
+            Parts = parts;
+            VirtualStarts = virtualStarts;
+            Length = length;
+        }
+
+        public static IndexedEntryDescriptor OpenFirst(string arcPath, Func<string, bool> predicate)
+        {
+            ArgumentNullException.ThrowIfNull(predicate);
+            using var stream = File.Open(arcPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+            var (_, records, strings, toc) = ReadIndex(stream, reader, arcPath);
+            foreach (var entry in toc)
+            {
+                if (entry.NameOffset < 0 || entry.NameLength < 0 || entry.NameOffset + entry.NameLength > strings.Length) continue;
+                var name = Decode(strings.AsSpan(entry.NameOffset, entry.NameLength)).Replace('\\', '/');
+                if (!predicate(name)) continue;
+
+                var parts = new Part[entry.PartCount];
+                var starts = new long[entry.PartCount];
+                long virtualStart = 0;
+                for (var i = 0; i < entry.PartCount; i++)
+                {
+                    var recordIndex = entry.FirstPart + i;
+                    if ((uint)recordIndex >= records.Length)
+                        throw new InvalidDataException("ARC part index is outside the record table.");
+                    var part = records[recordIndex];
+                    parts[i] = part;
+                    starts[i] = virtualStart;
+                    virtualStart += part.OutputSize;
+                }
+                if (virtualStart != entry.OutputSize)
+                    throw new InvalidDataException("ARC entry size does not match its parts.");
+                return new IndexedEntryDescriptor(arcPath, parts, starts, virtualStart);
+            }
+            throw new InvalidDataException($"No matching entry was found in {arcPath}.");
+        }
+
+        public Stream CreateStream() => new IndexedEntryStream(this);
+    }
+
+    private sealed class IndexedEntryStream : Stream
+    {
+        private readonly FileStream _file;
+        private readonly Part[] _parts;
+        private readonly long[] _virtualStarts;
+        private readonly long _length;
+        private int _cachedPartIndex = -1;
+        private int _cachedCompSize;
+        private int _lz4Si;
+        private int _lz4Di;
+        private bool _isFullBlock;
+        private byte[] _cachedPartData = new byte[262144];
+        private byte[] _compressedBuffer = new byte[262144];
+
+        public IndexedEntryStream(IndexedEntryDescriptor descriptor)
+        {
+            _file = new FileStream(descriptor.ArcPath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess);
+            _parts = descriptor.Parts;
+            _virtualStarts = descriptor.VirtualStarts;
+            _length = descriptor.Length;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => _length;
+        public override long Position { get; set; }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (Position >= _length || buffer.IsEmpty) return 0;
+            var maxRead = (int)Math.Min(buffer.Length, _length - Position);
+            var totalRead = 0;
+            while (totalRead < maxRead)
+            {
+                var partIndex = FindPart(Position);
+                var part = _parts[partIndex];
+                var virtualStart = _virtualStarts[partIndex];
+                var offsetInPart = (int)(Position - virtualStart);
+                var available = part.OutputSize - offsetInPart;
+                var toCopy = Math.Min(maxRead - totalRead, available);
+                var neededInPart = offsetInPart + toCopy;
+
+                var partData = GetPartDataUpTo(partIndex, part, neededInPart);
+                partData.Slice(offsetInPart, toCopy).CopyTo(buffer.Slice(totalRead, toCopy));
+                Position += toCopy;
+                totalRead += toCopy;
+            }
+            return totalRead;
+        }
+
+        private int FindPart(long virtualOffset)
+        {
+            int lo = 0, hi = _parts.Length - 1;
+            while (lo <= hi)
+            {
+                var mid = (lo + hi) >>> 1;
+                var start = _virtualStarts[mid];
+                var size = _parts[mid].OutputSize;
+                if (virtualOffset < start) hi = mid - 1;
+                else if (virtualOffset >= start + size) lo = mid + 1;
+                else return mid;
+            }
+            throw new InvalidDataException("ARC virtual offset is outside the entry bounds.");
+        }
+
+        private ReadOnlySpan<byte> GetPartDataUpTo(int partIndex, Part part, int neededLength)
+        {
+            if (_cachedPartIndex != partIndex)
+            {
+                if (_compressedBuffer.Length < part.CompressedSize)
+                    _compressedBuffer = new byte[Math.Max(part.CompressedSize, _compressedBuffer.Length * 2)];
+                if (_cachedPartData.Length < part.OutputSize)
+                    _cachedPartData = new byte[Math.Max(part.OutputSize, _cachedPartData.Length * 2)];
+
+                _file.Position = part.Offset;
+                _cachedCompSize = part.CompressedSize;
+                var compSpan = _compressedBuffer.AsSpan(0, _cachedCompSize);
+                _file.ReadExactly(compSpan);
+                _cachedPartIndex = partIndex;
+                _lz4Si = 0;
+                _lz4Di = 0;
+
+                if (part.CompressedSize == part.OutputSize)
+                {
+                    compSpan.CopyTo(_cachedPartData);
+                    _lz4Di = part.OutputSize;
+                    _isFullBlock = true;
+                    return _cachedPartData.AsSpan(0, _lz4Di);
+                }
+                _isFullBlock = false;
+            }
+
+            if (!_isFullBlock && _lz4Di < neededLength)
+            {
+                ResumeLz4OrFallback(_compressedBuffer.AsSpan(0, _cachedCompSize),
+                    _cachedPartData.AsSpan(0, part.OutputSize), neededLength,
+                    ref _lz4Si, ref _lz4Di, ref _isFullBlock);
+            }
+            return _cachedPartData.AsSpan(0, _lz4Di);
+        }
+
+        private static void ResumeLz4OrFallback(ReadOnlySpan<byte> source, Span<byte> output, int neededLength,
+            ref int si, ref int di, ref bool isFullBlock)
+        {
+            var expected = output.Length;
+            while (si < source.Length && di < neededLength)
+            {
+                var token = source[si++];
+                var literal = token >> 4;
+                if (literal == 15)
+                {
+                    byte extra;
+                    do
+                    {
+                        if (si >= source.Length) { FallbackDeflate(source, output, ref di, ref isFullBlock); return; }
+                        extra = source[si++];
+                        literal += extra;
+                    } while (extra == 255);
+                }
+                if (si + literal > source.Length || di + literal > expected)
+                {
+                    FallbackDeflate(source, output, ref di, ref isFullBlock);
+                    return;
+                }
+                source.Slice(si, literal).CopyTo(output.Slice(di, literal));
+                si += literal;
+                di += literal;
+                if (si >= source.Length) break;
+                if (si + 2 > source.Length)
+                {
+                    FallbackDeflate(source, output, ref di, ref isFullBlock);
+                    return;
+                }
+                var distance = source[si] | (source[si + 1] << 8);
+                si += 2;
+                if (distance <= 0 || distance > di)
+                {
+                    FallbackDeflate(source, output, ref di, ref isFullBlock);
+                    return;
+                }
+                var length = (token & 0x0f) + 4;
+                if ((token & 0x0f) == 15)
+                {
+                    byte extra;
+                    do
+                    {
+                        if (si >= source.Length) { FallbackDeflate(source, output, ref di, ref isFullBlock); return; }
+                        extra = source[si++];
+                        length += extra;
+                    } while (extra == 255);
+                }
+                if (di + length > expected)
+                {
+                    FallbackDeflate(source, output, ref di, ref isFullBlock);
+                    return;
+                }
+                if (distance >= length)
+                    output.Slice(di - distance, length).CopyTo(output.Slice(di, length));
+                else
+                    for (var j = 0; j < length; j++) output[di + j] = output[di + j - distance];
+                di += length;
+            }
+            if (si == source.Length)
+            {
+                if (di != expected) FallbackDeflate(source, output, ref di, ref isFullBlock);
+                else isFullBlock = true;
+            }
+        }
+
+        private static void FallbackDeflate(ReadOnlySpan<byte> input, Span<byte> output, ref int di, ref bool isFullBlock)
+        {
+            try
+            {
+                using var source = new MemoryStream(input.ToArray());
+                using var deflate = new DeflateStream(source, CompressionMode.Decompress);
+                var total = 0;
+                while (total < output.Length)
+                {
+                    var read = deflate.Read(output.Slice(total));
+                    if (read == 0) break;
+                    total += read;
+                }
+                if (total != output.Length) throw new InvalidDataException("Unexpected deflate output size.");
+                di = total;
+                isFullBlock = true;
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidDataException("ARC block is neither valid LZ4 nor deflate data.", ex);
+            }
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            Position = origin switch
+            {
+                SeekOrigin.Begin => offset,
+                SeekOrigin.Current => Position + offset,
+                SeekOrigin.End => _length + offset,
+                _ => throw new ArgumentOutOfRangeException(nameof(origin))
+            };
+
+        public override void Flush() { }
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _file.Dispose();
+            base.Dispose(disposing);
+        }
     }
 
     private static void ParseTagText(byte[] bytes, IDictionary<string, string> tags)
@@ -241,6 +512,6 @@ public static class ArcReader
     }
 
     private static uint U32(ReadOnlySpan<byte> data, int offset) => BinaryPrimitives.ReadUInt32LittleEndian(data[offset..]);
-    private sealed record Part(uint Offset, int CompressedSize, int OutputSize);
+    internal sealed record Part(uint Offset, int CompressedSize, int OutputSize);
     private sealed record Toc(int PartCount, int FirstPart, int NameLength, int NameOffset, long OutputSize);
 }

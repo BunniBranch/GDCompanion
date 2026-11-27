@@ -29,13 +29,21 @@ internal static class MapIndexRegressionTests
         var badChunk = (byte[])world.Clone();
         BinaryPrimitives.WriteUInt32LittleEndian(badChunk.AsSpan(countOffset - 4, 4), uint.MaxValue);
         RequireInvalid(badChunk, "compiled map index rejects a chunk extending beyond the index");
+
+        var shrineUid = new byte[] { 0x9D, 0xAD, 0x78, 0x65, 0x06, 0x45, 0xD9, 0x9B, 0x7D, 0xE6, 0xED, 0xB1, 0xC3, 0x2E, 0x5F, 0x80 };
+        var uidMarkers = Parse(CreateWorldWithTrailingUid(shrineUid));
+        var shrine = uidMarkers.Single(x => x.Category == "Devotion Shrine");
+        var riftgate = uidMarkers.Single(x => x.Category == "Riftgate");
+        Require(shrine.EntityUid == Convert.ToHexString(shrineUid) && riftgate.EntityUid is null &&
+                riftgate.WorldX == 30f && riftgate.WorldZ == 40f,
+            "compiled map chunk decodes trailing 16-byte shrine UniqueIds and keeps following placements aligned");
     }
 
     private static List<WorldMarkerRecord> Parse(byte[] world)
     {
         var parser = typeof(WorldMarkerCatalogService).GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
             .Single(x => x.Name == "ParsePrimaryPlacements" && x.GetParameters()[0].ParameterType == typeof(byte[]));
-        try { return (List<WorldMarkerRecord>)parser.Invoke(null, [world, CancellationToken.None, null])!; }
+        try { return (List<WorldMarkerRecord>)parser.Invoke(null, [world, CancellationToken.None, null, null])!; }
         catch (TargetInvocationException exception) when (exception.InnerException is not null)
         {
             ExceptionDispatchInfo.Capture(exception.InnerException).Throw();
@@ -118,6 +126,59 @@ internal static class MapIndexRegressionTests
         writer.Write((int)placements.Length);
         writer.Write(placements.ToArray());
         return level.ToArray();
+    }
+
+    private static byte[] CreateWorldWithTrailingUid(byte[] uid)
+    {
+        using var placements = new MemoryStream();
+        using var pw = new BinaryWriter(placements, Encoding.UTF8, leaveOpen: true);
+        pw.Write(2u);
+        WriteString(pw, "records/interactive/devotionshrine_test.dbr");
+        WriteString(pw, "records/interactive/riftgate_test.dbr");
+        pw.Write(2u);
+        // Shrine placement with hasUniqueId = 1 followed by 16-byte UniqueId.
+        pw.Write(0u);
+        for (var i = 0; i < 9; i++) pw.Write(i % 4 == 0 ? 1f : 0f);
+        pw.Write(10f); pw.Write(2f); pw.Write(20f);
+        pw.Write(1u);
+        pw.Write(uid);
+        // Second placement immediately following must stay aligned.
+        pw.Write(1u);
+        for (var i = 0; i < 9; i++) pw.Write(i % 4 == 0 ? 1f : 0f);
+        pw.Write(30f); pw.Write(4f); pw.Write(40f);
+        pw.Write(0u);
+
+        using var level = new MemoryStream();
+        using var lw = new BinaryWriter(level, Encoding.UTF8, leaveOpen: true);
+        lw.Write(new byte[] { (byte)'L', (byte)'V', (byte)'L', 15 });
+        lw.Write(new byte[24]);
+        lw.Write(5u);
+        lw.Write((int)placements.Length);
+        lw.Write(placements.ToArray());
+
+        using var world = new MemoryStream();
+        using var ww = new BinaryWriter(world, Encoding.UTF8, leaveOpen: true);
+        ww.Write("MAP\t"u8);
+        ww.Write(0);
+        ww.Write(1u);
+        var chunkSizeOffset = (int)world.Position;
+        ww.Write(0);
+        var countOffset = (int)world.Position;
+        ww.Write(1u);
+        for (var f = 0; f < 9; f++) ww.Write(0);
+        ww.Write(new byte[16]);
+        WriteString(ww, ""); WriteString(ww, ""); WriteString(ww, "");
+        WriteString(ww, "Levels/Region0A001.lvl");
+        var offsetField = (int)world.Position;
+        ww.Write(0); ww.Write(0);
+        var indexEnd = (int)world.Position;
+        var levelBytes = level.ToArray();
+        var levelPos = (int)world.Position;
+        ww.Write(levelBytes);
+        world.Position = 4; ww.Write(indexEnd - 8);
+        world.Position = chunkSizeOffset; ww.Write(indexEnd - countOffset);
+        world.Position = offsetField; ww.Write(levelPos); ww.Write(levelBytes.Length);
+        return world.ToArray();
     }
 
     private static void WriteString(BinaryWriter writer, string value)

@@ -56,27 +56,37 @@ public static class QuestNavigationIndex
         foreach (var script in scripts)
             foreach (var (function, links) in ReadScriptSpawns(script)) functions[function] = links;
         var result = new Dictionary<string, Target[]>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var targets = new List<Target>();
         foreach (var key in normalized.Keys)
         {
-            var targets = Visit(key, [], [], new HashSet<string>(StringComparer.OrdinalIgnoreCase), 0).Distinct().ToArray();
-            if (targets.Length > 0) result[key] = targets;
+            visited.Clear();
+            targets.Clear();
+            Visit(key, [], [], 0);
+            if (targets.Count > 0) result[key] = targets.Distinct().ToArray();
         }
         return result;
 
-        IEnumerable<Target> Visit(string key, string[] required, string[] excluded, HashSet<string> visited, int depth)
+        void Visit(string key, string[] required, string[] excluded, int depth)
         {
-            if (depth > 12 || !visited.Add(key) || !normalized.TryGetValue(key, out var record)) yield break;
-            if (record.Targets.Length > 0) yield return new(record.RecordPath, record.DisplayName, record.Targets, required, excluded);
-            var links = record.Children.Select(child => new QuestSpawnLink(child, [], []));
-            if (record.OnAddToWorld is not null && functions.TryGetValue(record.OnAddToWorld, out var scripted))
-                links = links.Concat(scripted);
-            foreach (var link in links)
+            if (depth > 12 || !normalized.TryGetValue(key, out var record) || !visited.Add(key)) return;
+            try
             {
-                var nextRequired = required.Concat(link.RequiredTokens).Distinct(StringComparer.Ordinal).ToArray();
-                var nextExcluded = excluded.Concat(link.ExcludedTokens).Distinct(StringComparer.Ordinal).ToArray();
-                if (nextRequired.Intersect(nextExcluded, StringComparer.Ordinal).Any()) continue;
-                foreach (var target in Visit(link.RecordPath, nextRequired, nextExcluded, new(visited, StringComparer.OrdinalIgnoreCase), depth + 1))
-                    yield return target;
+                if (record.Targets.Length > 0) targets.Add(new(record.RecordPath, record.DisplayName, record.Targets, required, excluded));
+                var links = record.Children.Select(child => new QuestSpawnLink(child, [], []));
+                if (record.OnAddToWorld is not null && functions.TryGetValue(record.OnAddToWorld, out var scripted))
+                    links = links.Concat(scripted);
+                foreach (var link in links)
+                {
+                    var nextRequired = required.Concat(link.RequiredTokens).Distinct(StringComparer.Ordinal).ToArray();
+                    var nextExcluded = excluded.Concat(link.ExcludedTokens).Distinct(StringComparer.Ordinal).ToArray();
+                    if (nextRequired.Intersect(nextExcluded, StringComparer.Ordinal).Any()) continue;
+                    Visit(link.RecordPath, nextRequired, nextExcluded, depth + 1);
+                }
+            }
+            finally
+            {
+                visited.Remove(key);
             }
         }
     }
@@ -107,6 +117,10 @@ public static class QuestNavigationIndex
             }
             if (valid) tables[name] = links.ToArray();
         }
+        var localFalseFlags = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match flag in Regex.Matches(text, @"\blocal\s+(\w+)\s*=\s*(?:false\b|\{\s*false(?:\s*,\s*false)*\s*,?\s*\})"))
+            localFalseFlags.Add(flag.Groups[1].Value);
+
         var result = new Dictionary<string, QuestSpawnLink[]>(StringComparer.Ordinal);
         var definitions = Regex.Matches(text, @"\bfunction\s+([\w.]+)\s*\(([^)]*)\)");
         for (var i = 0; i < definitions.Count; i++)
@@ -115,20 +129,49 @@ public static class QuestNavigationIndex
             var end = i + 1 < definitions.Count ? definitions[i + 1].Index : text.Length;
             var body = text[(definition.Index + definition.Length)..end];
             var firstArgument = definition.Groups[2].Value.Split(',')[0].Trim();
-            // Match only a swap anchored at this callback's object. Custom
-            // coordinates, helper wrappers and multiplayer overrides need a
-            // separate resolver, not a guessed point at the script anchor.
-            var calls = Regex.Matches(body, @"TokenStateBasedObjectSwap\s*\(\s*(\w+)\s*,\s*\w+\s*,\s*(\w+)\s*\)");
-            var beforeSwap = calls.Count == 1 ? body[..calls[0].Index] : body;
+            // Match swaps anchored at this callback's object, including standard
+            // entity creation args and false-initialized MP override boilerplate.
+            // Custom coordinates, unconditional overrides and gameplay conditions
+            // remain excluded so distant markers are never guessed.
+            var calls = Regex.Matches(body, @"TokenStateBasedObjectSwap\s*\(([^)]*)\)");
+            if (calls.Count != 1) continue;
+            var arguments = calls[0].Groups[1].Value.Split(',').Select(argument => argument.Trim()).ToArray();
+            if (arguments.Length is < 3 or > 7 || arguments[0] != firstArgument ||
+                !tables.TryGetValue(arguments[2], out var links))
+                continue;
+            var beforeSwap = body[..calls[0].Index];
+            if (arguments.Length >= 6 && arguments[5] is not ("nil" or "false"))
+            {
+                if (!Regex.IsMatch(arguments[5], @"^\w+$") ||
+                    !Regex.IsMatch(beforeSwap, @"\blocal\s+" + Regex.Escape(arguments[5]) + @"\s*=\s*false\b"))
+                    continue;
+            }
             var conditions = Regex.Matches(beforeSwap, @"\b(?:if|elseif)\s+(.*?)\s+then", RegexOptions.Singleline);
-            if (calls.Count == 1 && calls[0].Groups[1].Value == firstArgument &&
-                conditions.Cast<Match>().All(condition => condition.Groups[1].Value.Trim() == "Server") &&
+            if (conditions.Cast<Match>().All(condition => IsSafeSwapCondition(condition.Groups[1].Value.Trim(), localFalseFlags)) &&
                 !Regex.IsMatch(beforeSwap, @"\b(?:for|while|repeat|return)\b") &&
-                !body.Contains("SetCoords", StringComparison.Ordinal) &&
-                tables.TryGetValue(calls[0].Groups[2].Value, out var links))
+                !body.Contains("SetCoords", StringComparison.Ordinal))
                 result[definition.Groups[1].Value] = links;
         }
         return result;
+    }
+
+    private static bool IsSafeSwapCondition(string condition, IReadOnlySet<string> localFalseFlags)
+    {
+        if (condition == "Server") return true;
+        if (condition.Length == 0 || condition.Contains(':') || condition.Contains('=') ||
+            condition.Contains('<') || condition.Contains('>') || condition.Contains('.') ||
+            Regex.IsMatch(condition, @"\w\s*\("))
+            return false;
+        if (!Regex.IsMatch(condition, @"^[\s\(\)\w\[\]\|&]+$")) return false;
+        var identifiers = Regex.Matches(condition, @"\b[A-Za-z_]\w*\b");
+        if (identifiers.Count == 0) return false;
+        foreach (Match identifier in identifiers)
+        {
+            var name = identifier.Value;
+            if (name is "Server" or "not" or "and" or "or") continue;
+            if (!localFalseFlags.Contains(name)) return false;
+        }
+        return true;
     }
 
     public static string Normalize(string path) => path.Replace('\\', '/').Trim().TrimStart('/').ToLowerInvariant();

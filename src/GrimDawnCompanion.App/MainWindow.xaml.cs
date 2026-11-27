@@ -28,15 +28,22 @@ public partial class MainWindow : Window
     private GameInstallation? _game;
     private CatalogDocument? _document;
     private WorldMarkerCatalog? _navigationCatalog;
+    private Task<WorldMarkerCatalog>? _navigationCatalogTask;
     private DispatcherTimer? _navigationTimer;
+    private static readonly TimeSpan ActiveNavigationPollInterval = TimeSpan.FromMilliseconds(33);
+    private static readonly TimeSpan WaitingNavigationPollInterval = TimeSpan.FromMilliseconds(500);
     private const double NavigationCatalogRange = 48;
     private IReadOnlyList<string> _activeQuestPaths = [];
     private QuestNavigationState _questNavigationState = new();
     private bool _questStageDataReady;
     private ulong _nativeRadarContext;
     private bool _nativeRadarSubmitted;
+    private double? _lastMinimapDisplayRange;
     private IReadOnlyList<LiveMapMarkerRecord> _liveMapMarkers = [];
     private IReadOnlyList<LiveMapMarkerRecord> _regionalQuestMarkers = [];
+    private IReadOnlySet<string> _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _openedChestTokens = new(StringComparer.OrdinalIgnoreCase);
+    private int? _gameDifficulty;
     private string? _currentLevelPath;
     private MinimapGeometry? _minimapGeometry;
     private readonly RegionalQuestMarkerCache _questMarkerCache = new();
@@ -139,6 +146,7 @@ public partial class MainWindow : Window
             try { ShowStoredBookmarks(await _bookmarkStore.LoadAsync(_lifetime.Token)); }
             catch (Exception ex) { MessageBox.Show(this, "Bookmarks could not be loaded. The existing file has not been changed.\n" + ex.Message, "Bookmark storage", MessageBoxButton.OK, MessageBoxImage.Warning); }
             AutoUnbridgeBox.IsChecked = _settings.AutoUnbridgeOnExit;
+            AutoEnableRadarBox.IsChecked = _settings.AutoEnableRadarOnConnect;
             NavigationQuestBox.IsChecked = _settings.ShowActiveQuestMarkers;
             NavigationPoiBox.IsChecked = _settings.ShowPointOfInterestMarkers;
             foreach (var box in PoiTypesPanel.Children.OfType<CheckBox>())
@@ -160,20 +168,22 @@ public partial class MainWindow : Window
                 SetStatus("Catalog loaded", $"{_document.Items.Count:N0} items available while updates are checked.", 0);
             }
             await VerifyCompatibilityAsync();
-            var installedFingerprint = await CatalogService.ComputeSourceFingerprintAsync(_game, _lifetime.Token);
-            if (_document is null || !string.Equals(_document.SourceFingerprint, installedFingerprint, StringComparison.OrdinalIgnoreCase))
+            if (_document is null || !string.Equals(_document.SourceFingerprint,
+                await CatalogService.ComputeSourceFingerprintAsync(_game, _lifetime.Token), StringComparison.OrdinalIgnoreCase))
                 await RebuildCatalogAsync(automatic: true);
             else
                 SetStatus("Ready", $"Catalog verified against the installed game • {_document.Items.Count:N0} items", 100);
             _viewModel.SetQuestTokens(await tokenTask);
             try
             {
-                _navigationCatalog = await _worldMarkerCatalog.BuildAsync(
+                _navigationCatalogTask = _worldMarkerCatalog.BuildAsync(
                     _game, _document?.QuestRecordAssociations, _lifetime.Token, _document?.QuestNavigationRecords);
+                _navigationCatalog = await _navigationCatalogTask;
             }
             catch (Exception ex)
             {
                 _navigationCatalog = null;
+                _navigationCatalogTask = null;
                 SetStatus("Navigation catalog unavailable", ex.Message, 0);
             }
             UpdateNavigationUi();
@@ -231,6 +241,7 @@ public partial class MainWindow : Window
                 SetStatus("Refreshing companion data", "Updating quest and navigation indexes…", 95);
                 var tokens = _tokenCatalog.BuildAsync(_game, _lifetime.Token);
                 var navigation = _worldMarkerCatalog.BuildAsync(_game, _document?.QuestRecordAssociations, _lifetime.Token, _document?.QuestNavigationRecords);
+                _navigationCatalogTask = navigation;
                 _viewModel.SetQuestTokens(await tokens);
                 _navigationCatalog = await navigation;
                 UpdateNavigationUi();
@@ -266,7 +277,7 @@ public partial class MainWindow : Window
             _viewModel.IsConnected = true;
             StartGameplayAssistUi();
             _viewModel.NotifyConnectionChanged();
-            _viewModel.NavigationAvailable = _bridge.SupportsNavigationOverlay && _navigationCatalog is not null;
+            _viewModel.NavigationAvailable = _bridge.SupportsNativeRadar;
             _viewModel.NavigationActive = false;
             ConnectButton.Content = "Disconnect";
             ConnectButton.Background = (Brush)FindResource("Danger");
@@ -274,13 +285,24 @@ public partial class MainWindow : Window
             UpdateNavigationUi();
             SetStatus("Bridge active", $"Game process {_bridge.ProcessId} • {handshake}", 100);
             if (_bridge.SupportsUtilities)
-            {
-                try { _viewModel.Resources = await _bridge.GetResourcesAsync(_lifetime.Token); await RefreshResourceLimitsAsync(); }
-                catch { }
-            }
+                _ = RefreshInitialResourcesAsync(_bridge.ProcessId);
+            if (_settings.AutoEnableRadarOnConnect)
+                await TryEnableNavigationOverlayAsync(showValidationDialogs: false);
         }
         catch (Exception ex) { SetStatus("Connection failed", ex.Message, 0); MessageBox.Show(ex.Message, "Could not connect", MessageBoxButton.OK, MessageBoxImage.Warning); }
         finally { ConnectButton.IsEnabled = true; }
+    }
+
+    private async Task RefreshInitialResourcesAsync(int? connectedProcessId)
+    {
+        try
+        {
+            var resources = await _bridge.GetResourcesAsync(_lifetime.Token);
+            if (!_viewModel.IsConnected || _bridge.ProcessId != connectedProcessId) return;
+            _viewModel.Resources = resources;
+            await RefreshResourceLimitsAsync();
+        }
+        catch { }
     }
 
     private async Task DisconnectGameAsync()
@@ -365,15 +387,17 @@ public partial class MainWindow : Window
     }
     private async Task<CharacterResourceLimits> RefreshResourceLimitsAsync()
     {
-        var limits=await _bridge.GetResourceLimitsAsync(_lifetime.Token);
-        var bypass=ResourceCapBypassBox.IsChecked==true;
-          CharacterLevelCapText.Text=$"Current level: {limits.Level} • Maximum: {limits.LevelCap} • {(limits.UsesModRules ? "Active mod progression" : "Standard game/DLC progression")}";
-        MoneyLimitText.Text=$"Maximum: {limits.Caps[0]:N0}";
-        string pointLimit(int kind) => $"Maximum unspent: {limits.Available(kind,bypass):N0} • Allocated: {limits.Spent[kind]:N0} • Natural cap: {limits.Caps[kind]:N0}"+(bypass ? $" • Bypass total: {limits.EffectiveCap(kind,true):N0}" : "");
-        SkillLimitText.Text=pointLimit(1);
-        AttributeLimitText.Text=pointLimit(2);
-        DevotionLimitText.Text=pointLimit(3);
-          if(!limits.DevotionAccountingValid) DevotionLimitText.Text += $"\nChanges blocked: allocated + unspent = {(ulong)limits.Spent[3]+limits.Unspent[3]}, earned = {limits.DevotionEarned}. Open Skills/Devotion and refresh.";
+        var processId = _bridge.ProcessId;
+        var limits = await _bridge.GetResourceLimitsAsync(_lifetime.Token);
+        if (!_viewModel.IsConnected || _bridge.ProcessId != processId) return limits;
+        var bypass = ResourceCapBypassBox.IsChecked == true;
+        CharacterLevelCapText.Text = $"Current level: {limits.Level} • Maximum: {limits.LevelCap} • {(limits.UsesModRules ? "Active mod progression" : "Standard game/DLC progression")}";
+        MoneyLimitText.Text = $"Maximum: {limits.Caps[0]:N0}";
+        string pointLimit(int kind) => $"Maximum unspent: {limits.Available(kind, bypass):N0} • Allocated: {limits.Spent[kind]:N0} • Natural cap: {limits.Caps[kind]:N0}" + (bypass ? $" • Bypass total: {limits.EffectiveCap(kind, true):N0}" : "");
+        SkillLimitText.Text = pointLimit(1);
+        AttributeLimitText.Text = pointLimit(2);
+        DevotionLimitText.Text = pointLimit(3);
+        if (!limits.DevotionAccountingValid) DevotionLimitText.Text += $"\nChanges blocked: allocated + unspent = {(ulong)limits.Spent[3] + limits.Unspent[3]}, earned = {limits.DevotionEarned}. Open Skills/Devotion and refresh.";
         return limits;
     }
     private async void SetCharacterResource(object sender, RoutedEventArgs e)
@@ -448,6 +472,7 @@ public partial class MainWindow : Window
         {
             var state = await _bridge.SetTokenAsync(_viewModel.SelectedToken.Name, present, _lifetime.Token);
             _viewModel.TokenState = state ? "Present" : "Absent";
+            _openedChestTokens.Clear();
             SetStatus("Token repaired", $"{_viewModel.SelectedToken.Name} is now {_viewModel.TokenState.ToLowerInvariant()}.", 100);
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Quest token change not completed", MessageBoxButton.OK, MessageBoxImage.Warning); }
@@ -553,46 +578,106 @@ public partial class MainWindow : Window
 
     private async void ToggleNavigationMarkers(object sender, RoutedEventArgs e)
     {
-        if (_navigationBusy) return;
-        if (!_bridge.IsConnected || !_bridge.SupportsNavigationOverlay || _navigationCatalog is null)
+        if (_viewModel.NavigationActive)
         {
-            MessageBox.Show("Connect with the current bridge and wait for the navigation catalog to finish loading. If Grim Dawn still has an older bridge loaded, restart the game once.",
-                "Navigation unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
+            if (_navigationBusy) return;
+            try
+            {
+                _navigationBusy = true;
+                UpdateNavigationUi();
+                await DisableNavigationOverlayAsync(clearBridgeState: true);
+            }
+            catch (Exception ex)
+            {
+                await DisableNavigationOverlayAsync(clearBridgeState: false);
+                MessageBox.Show(ex.Message, "Could not update navigation markers", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            finally
+            {
+                _navigationBusy = false;
+                UpdateNavigationUi();
+            }
             return;
+        }
+
+        await TryEnableNavigationOverlayAsync(showValidationDialogs: true);
+    }
+
+    private async Task<bool> TryEnableNavigationOverlayAsync(bool showValidationDialogs)
+    {
+        if (_navigationBusy || _viewModel.NavigationActive) return false;
+        if (!_bridge.IsConnected || !_bridge.SupportsNativeRadar)
+        {
+            if (showValidationDialogs)
+                MessageBox.Show("Connect with a supported Grim Dawn build first. If Grim Dawn still has an older bridge loaded, restart the game once.",
+                    "Navigation unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
+            return false;
         }
 
         var quests = NavigationQuestBox.IsChecked == true;
         var points = NavigationPoiBox.IsChecked == true;
-        if (!_viewModel.NavigationActive && !quests && !points)
+        if (!quests && !points)
         {
-            MessageBox.Show("Select Active Quest Objectives, Points Of Interest, or both.", "Choose marker types", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
+            if (showValidationDialogs)
+                MessageBox.Show("Select Active Quest Objectives, Points Of Interest, or both.", "Choose marker types", MessageBoxButton.OK, MessageBoxImage.Information);
+            return false;
         }
 
         try
         {
             _navigationBusy = true;
             UpdateNavigationUi();
-            if (_viewModel.NavigationActive)
+            var catalog = await EnsureNavigationCatalogAsync();
+            if (catalog is null || !_bridge.IsConnected || !_bridge.SupportsNativeRadar)
             {
-                await DisableNavigationOverlayAsync(clearBridgeState: true);
+                if (showValidationDialogs && catalog is null)
+                    MessageBox.Show("Navigation map data is unavailable for the selected game installation.",
+                        "Navigation unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
+                return false;
             }
-            else
-            {
-                await EnableNavigationBridgeAsync(quests, points);
-                _viewModel.NavigationActive = true;
-                StartNavigationOverlay();
-            }
+            await EnableNavigationBridgeAsync(quests, points);
+            _viewModel.NavigationActive = true;
+            StartNavigationOverlay();
+            return true;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            return false;
         }
         catch (Exception ex)
         {
             await DisableNavigationOverlayAsync(clearBridgeState: false);
-            MessageBox.Show(ex.Message, "Could not update navigation markers", MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (showValidationDialogs)
+                MessageBox.Show(ex.Message, "Could not update navigation markers", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
         }
         finally
         {
             _navigationBusy = false;
             UpdateNavigationUi();
+        }
+    }
+
+    private async Task<WorldMarkerCatalog?> EnsureNavigationCatalogAsync()
+    {
+        if (_navigationCatalog is not null) return _navigationCatalog;
+        if (_navigationCatalogTask is not null)
+        {
+            _navigationCatalog = await _navigationCatalogTask;
+            return _navigationCatalog;
+        }
+        if (_game is null) return null;
+        _navigationCatalogTask = _worldMarkerCatalog.BuildAsync(
+            _game, _document?.QuestRecordAssociations, _lifetime.Token, _document?.QuestNavigationRecords);
+        try
+        {
+            _navigationCatalog = await _navigationCatalogTask;
+            return _navigationCatalog;
+        }
+        catch
+        {
+            _navigationCatalogTask = null;
+            throw;
         }
     }
 
@@ -639,7 +724,7 @@ public partial class MainWindow : Window
     {
         UpdateMasteryAuditUi();
         UpdateBookmarkUi();
-        var available = _bridge.IsConnected && _bridge.SupportsNativeRadar && _navigationCatalog is not null;
+        var available = _bridge.IsConnected && _bridge.SupportsNativeRadar;
         _viewModel.NavigationAvailable = available;
         NavigationToggleButton.IsEnabled = available && !_navigationBusy;
         NavigationQuestBox.IsEnabled = available && !_navigationBusy;
@@ -648,29 +733,38 @@ public partial class MainWindow : Window
         NavigationToggleButton.Background = (Brush)FindResource(_viewModel.NavigationActive ? "Danger" : "Accent");
         NavigationToggleButton.Foreground = _viewModel.NavigationActive ? Brushes.White : (Brush)FindResource("AccentForeground");
         NavigationStatusDot.Fill = (Brush)FindResource(_viewModel.NavigationActive ? "Accent" : "SecondaryText");
-        _viewModel.NavigationStatusText = _navigationBusy ? "Updating the radar filters…" :
+        _viewModel.NavigationStatusText = _navigationBusy ? (_navigationCatalog is null ? "Waiting for navigation map indexing…" : "Updating the radar filters…") :
             _viewModel.NavigationActive ? "Active — markers are rendered inside Grim Dawn while its minimap is visible." :
-            available ? $"Ready — {_navigationCatalog!.Markers.Count:N0} installed locations indexed." :
+            available && _navigationCatalog is not null ? $"Ready — {_navigationCatalog.Markers.Count:N0} installed locations indexed." :
+            available ? "Ready — map indexing will complete automatically when enabled." :
             _bridge.IsConnected ? "Native in-game radar is unavailable for this game build." :
             "Connect to Grim Dawn to enable the in-game radar.";
     }
 
-    private void StartNavigationOverlay()
+    private void ResetNavigationSessionState()
     {
         _navigationPollCount = 0;
         _nativeRadarContext = 0;
         _nativeRadarSubmitted = false;
+        _lastMinimapDisplayRange = null;
         _questNavigationState = new();
         _questStageDataReady = false;
         _activeQuestPaths = [];
         _liveMapMarkers = [];
         _regionalQuestMarkers = [];
+        _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _openedChestTokens.Clear();
+        _gameDifficulty = null;
         _currentLevelPath = null;
+        _minimapGeometry = null;
         _questMarkerCache.Clear();
-        _navigationTimer ??= new DispatcherTimer(DispatcherPriority.Render)
-        {
-            Interval = TimeSpan.FromMilliseconds(33)
-        };
+    }
+
+    private void StartNavigationOverlay()
+    {
+        ResetNavigationSessionState();
+        _navigationTimer ??= new DispatcherTimer(DispatcherPriority.Render);
+        _navigationTimer.Interval = ActiveNavigationPollInterval;
         _navigationTimer.Tick -= PollNavigationOverlay;
         _navigationTimer.Tick += PollNavigationOverlay;
         _navigationTimer.Start();
@@ -684,6 +778,8 @@ public partial class MainWindow : Window
         try
         {
             var player = await _bridge.GetPlayerPositionAsync(_lifetime.Token);
+            if (_navigationTimer is not null && _navigationTimer.Interval != ActiveNavigationPollInterval)
+                _navigationTimer.Interval = ActiveNavigationPollInterval;
             if (_navigationPollCount++ % 15 == 0)
             {
                 _currentLevelPath = _bridge.SupportsRegion
@@ -720,56 +816,122 @@ public partial class MainWindow : Window
                             ? "Quest data unavailable — long-range objectives cannot be resolved yet."
                             : $"Quest data: {_activeQuestPaths.Count} active tracked quests • {catalogObjectives.Count} catalog targets in this map region.";
                 _liveMapMarkers = await _bridge.GetLiveMapMarkersAsync(_lifetime.Token);
+                if (_bridge.SupportsRestoredShrines)
+                {
+                    var restoredShrines = await _bridge.GetRestoredShrineStateAsync(_lifetime.Token);
+                    if (restoredShrines is not null)
+                    {
+                        if (restoredShrines.Difficulty != _gameDifficulty)
+                            _openedChestTokens.Clear();
+                        _restoredShrineUids = restoredShrines.Uids;
+                        _gameDifficulty = restoredShrines.Difficulty;
+                    }
+                }
+                if (NavigationPoiBox.IsChecked == true &&
+                    PoiFilters.Allows(_settings.EnabledPoiTypes, "One-Shot Chest") &&
+                    _bridge.Capabilities.Contains("TOKENS"))
+                {
+                    try
+                    {
+                        foreach (var tokenGroup in NavigationOverlayProjection.CandidateOneShotChestTokens(
+                                     player, _navigationCatalog.Markers, _currentLevelPath, _openedChestTokens))
+                        {
+                            foreach (var token in tokenGroup)
+                            {
+                                if (await _bridge.HasTokenAsync(token, _lifetime.Token))
+                                {
+                                    _openedChestTokens.Add(token);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception) when (!_lifetime.IsCancellationRequested) { }
+                }
                 var region = NavigationOverlayProjection.ResolveRegionFamily(_currentLevelPath) ??
                              NavigationOverlayProjection.ResolveCurrentRegionFamily(
                                  player, _navigationCatalog.Markers, NavigationCatalogRange);
                 _regionalQuestMarkers = _questMarkerCache.Update(region, _activeQuestPaths, _liveMapMarkers, player,
                     Math.Max(120, NavigationCatalogRange * 1.75));
             }
-            // Fetch the coherent render frame last, after slower quest/catalog queries.
-            _minimapGeometry = await _bridge.GetMinimapFrameAsync(_lifetime.Token);
+            // Fetch the unified surface render frame last, after slower quest/catalog queries.
+            var radarFrame = await _bridge.GetRadarFrameAsync(_lifetime.Token);
+            _minimapGeometry = radarFrame?.Minimap;
+            if (_minimapGeometry?.Projection is { } activeProjection)
+                _lastMinimapDisplayRange = activeProjection.DisplayRange;
             var liveMarkers = _liveMapMarkers.Where(marker => marker.Type != 21)
                 .Concat(_regionalQuestMarkers)
                 .Select(ToOverlayMarker);
-            if (_minimapGeometry?.Projection is null || _minimapGeometry.RenderContext == 0)
+            if (radarFrame is null)
             {
                 if (_nativeRadarSubmitted) await _bridge.ClearNativeRadarAsync(_lifetime.Token);
                 _nativeRadarSubmitted = false;
-                NavigationAlignmentStatusText.Text = "Waiting for a supported visible minimap; in-game radar hidden.";
-                _viewModel.NavigationStatusText = "Radar enabled — waiting for the game's minimap.";
+                _openedChestTokens.Clear();
+                NavigationAlignmentStatusText.Text = "Waiting for a supported minimap or the full map; in-game radar hidden.";
+                _viewModel.NavigationStatusText = "Radar enabled — waiting for the game's minimap or map.";
                 return;
             }
-            if (_nativeRadarContext != 0 && _nativeRadarContext != _minimapGeometry.RenderContext)
+            if (_nativeRadarContext != 0 && _nativeRadarContext != radarFrame.RenderContext)
             {
                 await _bridge.ClearNativeRadarAsync(_lifetime.Token);
-                _nativeRadarContext = _minimapGeometry.RenderContext;
+                _nativeRadarContext = radarFrame.RenderContext;
                 _nativeRadarSubmitted = false;
+                _restoredShrineUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _openedChestTokens.Clear();
+                _gameDifficulty = null;
                 _navigationPollCount = 0; // Refresh map/quest selection before using the new render context.
                 return;
             }
-            _nativeRadarContext = _minimapGeometry.RenderContext;
+            _nativeRadarContext = radarFrame.RenderContext;
             if (!_nativeRadarSubmitted || _navigationPollCount % 3 == 1)
             {
+                // Single source of truth: one selection and one upload feeds both
+                // the corner minimap (rim-clamped) and the full map (viewport-culled).
+                var effectiveRange = _minimapGeometry?.Projection is null
+                    ? (_lastMinimapDisplayRange ?? NavigationCatalogRange)
+                    : NavigationCatalogRange;
                 var selected = NavigationOverlayProjection.Build(player, _navigationCatalog.Markers.Concat(liveMarkers), _activeQuestPaths,
-                    NavigationQuestBox.IsChecked == true, NavigationPoiBox.IsChecked == true, NavigationCatalogRange,
-                    _currentLevelPath, _minimapGeometry.Projection, _questNavigationState, _settings.EnabledPoiTypes);
+                    NavigationQuestBox.IsChecked == true, NavigationPoiBox.IsChecked == true, effectiveRange,
+                    _currentLevelPath, _minimapGeometry?.Projection, _questNavigationState,
+                    _settings.EnabledPoiTypes, _restoredShrineUids, _gameDifficulty, _openedChestTokens);
                 await _bridge.SetNativeRadarFrameAsync(_nativeRadarContext, selected, _lifetime.Token);
                 _nativeRadarSubmitted = true;
             }
-            NavigationAlignmentStatusText.Text = $"In-game rendering • minimap {_minimapGeometry.Width:0} px • fullscreen and windowed modes";
+            NavigationAlignmentStatusText.Text = radarFrame.FullMapOpen && _minimapGeometry is null
+                ? "In-game rendering • full map • fullscreen and windowed modes"
+                : radarFrame.FullMapOpen
+                    ? $"In-game rendering • full map + minimap {_minimapGeometry!.Width:0} px • fullscreen and windowed modes"
+                    : $"In-game rendering • minimap {_minimapGeometry!.Width:0} px • fullscreen and windowed modes";
             if (_navigationPollCount % 15 == 1)
             {
                 var native = await _bridge.GetNativeRadarStatusAsync(_lifetime.Token);
                 _viewModel.NavigationStatusText = native.Rendering
-                    ? $"Active — {native.Drawn} markers rendered inside Grim Dawn."
+                    ? (radarFrame.FullMapOpen
+                        ? $"Active — {native.Drawn} markers rendered on the full map."
+                        : $"Active — {native.Drawn} markers rendered inside Grim Dawn.")
                     : "Radar enabled — waiting for a foreground game render.";
                 if (NavigationQuestBox.IsChecked == true && !_bridge.SupportsLiveQuestTasks)
                     _viewModel.NavigationStatusText += " Restart Grim Dawn and reconnect for reliable long-range quest stages.";
                 else if (NavigationQuestBox.IsChecked == true && !_questStageDataReady)
                     _viewModel.NavigationStatusText += " Waiting for tracked quest stages; nearby stars only.";
+                if (_bridge.SupportsNativeRadar && !_bridge.SupportsNativeMap)
+                    _viewModel.NavigationStatusText += " Full-map markers need the updated bridge; restart Grim Dawn and reconnect.";
             }
         }
         catch (OperationCanceledException) { }
+        catch (InvalidOperationException ex) when (GameBridgeClient.IsWaitingForWorldError(ex.Message))
+        {
+            if (_nativeRadarSubmitted && _bridge.IsConnected && _bridge.SupportsNativeRadar)
+            {
+                try { await _bridge.ClearNativeRadarAsync(_lifetime.Token); } catch { }
+            }
+            ResetNavigationSessionState();
+            if (_navigationTimer is not null && _navigationTimer.Interval != WaitingNavigationPollInterval)
+                _navigationTimer.Interval = WaitingNavigationPollInterval;
+            NavigationQuestDiagnosticsText.Text = "";
+            NavigationAlignmentStatusText.Text = "Waiting for a character to enter the game world; in-game radar paused.";
+            _viewModel.NavigationStatusText = "Radar enabled — waiting to enter the game world.";
+        }
         catch
         {
             await DisableNavigationOverlayAsync(clearBridgeState: false);
@@ -786,15 +948,8 @@ public partial class MainWindow : Window
         {
             try { await _bridge.ClearNativeRadarAsync(_lifetime.Token); } catch { }
         }
-        _nativeRadarSubmitted = false;
-        _nativeRadarContext = 0;
+        ResetNavigationSessionState();
         NavigationQuestDiagnosticsText.Text = "";
-        _activeQuestPaths = [];
-        _liveMapMarkers = [];
-        _regionalQuestMarkers = [];
-        _currentLevelPath = null;
-        _minimapGeometry = null;
-        _questMarkerCache.Clear();
         _viewModel.NavigationActive = false;
         if (clearBridgeState && _bridge.IsConnected && _bridge.SupportsNavigationOverlay)
         {
@@ -826,7 +981,7 @@ public partial class MainWindow : Window
     {
         var category = marker.Type switch
         {
-            3 => "Travel Utility",
+            3 => "Riftgate",
             21 => "Quest Objective",
             2 => "NPC or Site",
             7 => "Vendor",
@@ -855,6 +1010,14 @@ public partial class MainWindow : Window
     {
         if (!_settingsLoaded) return;
         _settings.AutoUnbridgeOnExit = AutoUnbridgeBox.IsChecked == true;
+        try { await _settings.SaveAsync(); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Could not save setting", MessageBoxButton.OK, MessageBoxImage.Warning); }
+    }
+
+    private async void AutoEnableRadarChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsLoaded) return;
+        _settings.AutoEnableRadarOnConnect = AutoEnableRadarBox.IsChecked == true;
         try { await _settings.SaveAsync(); }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Could not save setting", MessageBoxButton.OK, MessageBoxImage.Warning); }
     }
@@ -933,9 +1096,11 @@ internal sealed class AppSettings
     private static readonly string PathName = Path.Combine(CompanionDataPaths.DirectoryPath, "settings.json");
     public string? GameDirectory { get; set; }
     public bool AutoUnbridgeOnExit { get; set; } = true;
+    public bool AutoEnableRadarOnConnect { get; set; }
     public bool ShowActiveQuestMarkers { get; set; } = true;
     public bool ShowPointOfInterestMarkers { get; set; } = true;
     public PoiFilter EnabledPoiTypes { get; set; } = PoiFilter.All;
+    public int PoiFilterVersion { get; set; }
 
     public static async Task<AppSettings> LoadAsync()
     {
@@ -943,15 +1108,23 @@ internal sealed class AppSettings
         {
             if (File.Exists(PathName))
             {
-                return JsonSerializer.Deserialize<AppSettings>(await File.ReadAllTextAsync(PathName)) ?? new();
+                var settings = JsonSerializer.Deserialize<AppSettings>(await File.ReadAllTextAsync(PathName))
+                    ?? new AppSettings { PoiFilterVersion = PoiFilters.CurrentFilterVersion };
+                if (settings.PoiFilterVersion < PoiFilters.CurrentFilterVersion)
+                {
+                    settings.EnabledPoiTypes = PoiFilters.MigrateFilter(settings.EnabledPoiTypes, settings.PoiFilterVersion);
+                    settings.PoiFilterVersion = PoiFilters.CurrentFilterVersion;
+                }
+                return settings;
             }
         }
         catch { }
-        return new AppSettings();
+        return new AppSettings { PoiFilterVersion = PoiFilters.CurrentFilterVersion };
     }
 
     public async Task SaveAsync()
     {
+        PoiFilterVersion = PoiFilters.CurrentFilterVersion;
         Directory.CreateDirectory(Path.GetDirectoryName(PathName)!);
         await File.WriteAllTextAsync(PathName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }

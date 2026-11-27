@@ -13,6 +13,8 @@ public static class NavigationOverlayProjection
     private const int MaximumPoiTargets = 48;
     private const int MinimumPoiTargets = 8;
     private const int MaximumNearbyTravelTargets = 8;
+    private const int MaximumRiftgates = 2;
+    private const double MaximumLocalPoiDistance = 1000;
     private const double PoiEdgeRatio = 0.91;
     private const double QuestEdgeRatio = 1.05;
     private const double InverseSqrtTwo = 0.7071067811865476;
@@ -25,7 +27,8 @@ public static class NavigationOverlayProjection
         bool showPointsOfInterest,
         double displayRange,
         string? currentLevelPath = null, MinimapProjection? projection = null, QuestNavigationState? questState = null,
-        PoiFilter poiFilter = PoiFilter.All)
+        PoiFilter poiFilter = PoiFilter.All, IReadOnlySet<string>? restoredShrineUids = null, int? gameDifficulty = null,
+        IReadOnlySet<string>? openedChestTokens = null)
     {
         displayRange = projection?.DisplayRange ?? Math.Clamp(displayRange, 25, 100);
         var active = activeQuestPaths.Select(NormalizeQuestPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -65,15 +68,56 @@ public static class NavigationOverlayProjection
         {
             // Filter before quotas/fallback selection, but retain all original
             // points for quest-region anchoring. POI preferences cannot hide quests.
-            var poiPoints = points.Where(point => PoiFilters.Allows(poiFilter, point.Marker.Category)).ToArray();
+            var currentPoiRegion = LevelRegionFamily(currentLevelPath ?? "");
+            var poiPoints = points.Where(point => PoiFilters.Allows(poiFilter, IsRiftgate(point.Marker) ? "Riftgate" : point.Marker.Category) &&
+                                                  (IsRiftgate(point.Marker) || point.Distance <= MaximumLocalPoiDistance) &&
+                                                  !IsExcludedDevotionShrine(point.Marker, restoredShrineUids, gameDifficulty) &&
+                                                  !IsExcludedOneShotChest(point.Marker, openedChestTokens) &&
+                                                  (IsLive(point.Marker) || MatchesPoiLocationDomain(currentPoiRegion, point.Marker)))
+                .ToArray();
             // Game-owned live markers are the only reliable nearby POIs: the
             // installed catalog spans separate world maps whose coordinates
             // can overlap. Catalog entries remain useful as distant bearings.
-            var live = poiPoints.Where(point => point.Marker.Category != "Quest Objective" && IsLive(point.Marker) &&
-                                             point.Distance <= displayRange)
+            var nearbyOtherLive = poiPoints.Where(point => point.Marker.Category != "Quest Objective" &&
+                                                           IsLive(point.Marker) && !IsRiftgate(point.Marker) &&
+                                                           !IsDevotionShrine(point.Marker) &&
+                                                           !IsOneShotChest(point.Marker) &&
+                                                           point.Distance <= displayRange)
                 .OrderBy(point => point.Distance)
                 .Take(MaximumPoiTargets)
                 .ToArray();
+            var liveRiftgates = poiPoints.Where(point => IsLive(point.Marker) && IsRiftgate(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var allCatalogRiftgates = poiPoints.Where(point => point.Marker.Category == "Riftgate" && !IsLive(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var catalogRiftgates = allCatalogRiftgates.Where(point => point.Distance > displayRange).ToArray();
+            var selectedRiftgates = SelectClosestRiftgates(liveRiftgates, catalogRiftgates, allCatalogRiftgates);
+            var nearbyRiftgates = selectedRiftgates.Where(point => point.Distance <= displayRange).ToArray();
+            var distantRiftgates = selectedRiftgates.Where(point => point.Distance > displayRange).ToArray();
+            var liveShrines = poiPoints.Where(point => IsLive(point.Marker) && IsDevotionShrine(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var catalogShrines = poiPoints.Where(point => IsDevotionShrine(point.Marker) && !IsLive(point.Marker) &&
+                                                          point.Distance > displayRange)
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var selectedShrines = SelectClosestDevotionShrines(liveShrines, catalogShrines);
+            var nearbyShrines = selectedShrines.Where(point => point.Distance <= displayRange).ToArray();
+            var distantShrines = selectedShrines.Where(point => point.Distance > displayRange).ToArray();
+            // Grim Dawn's FixedItemContainer::AppendDetailMapData never emits
+            // live minimap nuggets for one-shot chests, so keep catalog
+            // chests eligible at all distances up to MaximumLocalPoiDistance.
+            var liveChests = poiPoints.Where(point => IsLive(point.Marker) && IsOneShotChest(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var catalogChests = poiPoints.Where(point => IsOneShotChest(point.Marker) && !IsLive(point.Marker))
+                .OrderBy(point => point.Distance)
+                .ToArray();
+            var selectedChests = SelectClosestDistinct(liveChests, catalogChests, MaximumPoiTargets);
+            var nearbyChests = selectedChests.Where(point => point.Distance <= displayRange).ToArray();
+            var distantChests = selectedChests.Where(point => point.Distance > displayRange).ToArray();
             // Static boats and ferries are absent from some game minimap
             // passes. Their catalog placements are safe and useful nearby,
             // while other catalog POIs stay direction-only to avoid markers
@@ -83,13 +127,23 @@ public static class NavigationOverlayProjection
                 .OrderBy(point => point.Distance)
                 .Take(MaximumNearbyTravelTargets)
                 .ToArray();
-            var nearby = live.Concat(nearbyTravel).DistinctBy(point => point.Marker.Id).ToArray();
+            var nearby = nearbyRiftgates.Concat(nearbyShrines).Concat(nearbyChests).Concat(nearbyOtherLive).Concat(nearbyTravel)
+                .DistinctBy(point => point.Marker.Id)
+                .Take(Math.Max(0, MaximumPoiTargets - distantRiftgates.Length - distantShrines.Length - distantChests.Length))
+                .ToArray();
             var fallbackCount = Math.Max(0, MinimumPoiTargets - nearby.Length);
-            var distant = poiPoints.Where(point => point.Marker.Category != "Quest Objective" && !IsLive(point.Marker) &&
+            var distant = poiPoints.Where(point => point.Marker.Category != "Quest Objective" &&
+                                                point.Marker.Category != "Riftgate" &&
+                                                !IsDevotionShrine(point.Marker) &&
+                                                !IsOneShotChest(point.Marker) &&
+                                                !IsLive(point.Marker) &&
                                                 point.Distance > displayRange)
                 .OrderBy(point => point.Distance)
                 .Take(fallbackCount);
-            pois = nearby.Concat(distant).Take(MaximumPoiTargets).ToArray();
+            pois = nearby.Concat(distantRiftgates).Concat(distantShrines).Concat(distantChests).Concat(distant)
+                .DistinctBy(point => point.Marker.Id)
+                .Take(MaximumPoiTargets)
+                .ToArray();
         }
 
         return quests.Concat(pois).Select(point => Project(player, point, displayRange, projection)).ToArray();
@@ -283,6 +337,129 @@ public static class NavigationOverlayProjection
 
     private static bool IsLive(WorldMarkerRecord marker) =>
         marker.QuestPaths?.Contains("$live", StringComparer.Ordinal) == true;
+
+    private static bool IsRiftgate(WorldMarkerRecord marker) =>
+        marker.Category == "Riftgate" ||
+        (IsLive(marker) && marker.Category == "Travel Utility" &&
+         string.Equals(marker.RecordPath, "live://minimap/3", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsGenericRiftgateLabel(string? value) =>
+        string.IsNullOrWhiteSpace(value) ||
+        value.Equals("Riftgate", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("Travel Utility", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsDevotionShrine(WorldMarkerRecord marker) => marker.Category == "Devotion Shrine";
+
+    private static bool IsOneShotChest(WorldMarkerRecord marker) => marker.Category == "One-Shot Chest";
+
+    private static bool IsExcludedOneShotChest(WorldMarkerRecord marker, IReadOnlySet<string>? openedChestTokens) =>
+        IsOneShotChest(marker) && openedChestTokens is not null && marker.ExcludedTokens is { Length: > 0 } &&
+        marker.ExcludedTokens.Any(openedChestTokens.Contains);
+
+    public static IEnumerable<string[]> CandidateOneShotChestTokens(
+        WorldPosition player,
+        IEnumerable<WorldMarkerRecord> catalog,
+        string? currentLevelPath = null,
+        IReadOnlySet<string>? knownOpenedTokens = null)
+    {
+        var currentPoiRegion = LevelRegionFamily(currentLevelPath ?? "");
+        var seenGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var marker in catalog
+                     .Where(marker => !IsLive(marker) && IsOneShotChest(marker) &&
+                                      Distance(player, marker) <= MaximumLocalPoiDistance &&
+                                      MatchesPoiLocationDomain(currentPoiRegion, marker) &&
+                                      marker.ExcludedTokens is { Length: > 0 } &&
+                                      !IsExcludedOneShotChest(marker, knownOpenedTokens))
+                     .OrderBy(marker => Distance(player, marker)))
+        {
+            var groupKey = string.Join('\0', marker.ExcludedTokens!);
+            if (seenGroups.Add(groupKey))
+                yield return marker.ExcludedTokens!;
+        }
+    }
+
+    private static bool IsOverworldRegionFamily(string? family)
+    {
+        if (string.IsNullOrEmpty(family)) return false;
+        var slash = family.LastIndexOf('/');
+        var directory = slash >= 0 ? family[..slash] : "";
+        var stem = slash >= 0 ? family[(slash + 1)..] : family;
+        return stem.Length == 8 &&
+               stem.StartsWith("region0", StringComparison.Ordinal) &&
+               char.IsLetter(stem[7]) &&
+               directory is "" or "levels" or "levels/waterregions" or "levels/sideareas";
+    }
+
+    private static bool MatchesPoiLocationDomain(string? currentRegionFamily, WorldMarkerRecord marker)
+    {
+        if (currentRegionFamily is null) return true;
+        var markerFamily = LevelRegionFamily(marker.LevelPath);
+        if (markerFamily is null) return false;
+        if (IsOverworldRegionFamily(currentRegionFamily))
+            return IsOverworldRegionFamily(markerFamily);
+        return string.Equals(markerFamily, currentRegionFamily, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsExcludedDevotionShrine(
+        WorldMarkerRecord marker,
+        IReadOnlySet<string>? restoredShrineUids,
+        int? gameDifficulty)
+    {
+        if (!IsDevotionShrine(marker)) return false;
+        if (IsLive(marker))
+            return string.Equals(marker.DisplayName?.Trim(), "Restored Shrine", StringComparison.OrdinalIgnoreCase);
+        if (marker.HideMapIcon) return true;
+        if (gameDifficulty is >= 0 and <= 2 &&
+            (marker.DisabledDifficultiesMask & (1 << gameDifficulty.Value)) != 0)
+            return true;
+        return restoredShrineUids is not null && !string.IsNullOrEmpty(marker.EntityUid) &&
+               restoredShrineUids.Contains(marker.EntityUid);
+    }
+
+    private static Candidate[] SelectClosestDevotionShrines(
+        IReadOnlyCollection<Candidate> liveShrines,
+        IReadOnlyCollection<Candidate> catalogShrines) =>
+        SelectClosestDistinct(liveShrines, catalogShrines, MaximumPoiTargets);
+
+    private static Candidate[] SelectClosestRiftgates(
+        IReadOnlyCollection<Candidate> liveRiftgates,
+        IReadOnlyCollection<Candidate> catalogRiftgates,
+        IReadOnlyCollection<Candidate> allCatalogRiftgates)
+    {
+        var enrichedLive = liveRiftgates.Select(live =>
+        {
+            if (!IsGenericRiftgateLabel(live.Marker.DisplayName)) return live;
+            var match = allCatalogRiftgates
+                .Where(catalog => !IsGenericRiftgateLabel(catalog.Marker.DisplayName) &&
+                                  MarkerDistance(live.Marker, catalog.Marker) <= 16)
+                .OrderBy(catalog => MarkerDistance(live.Marker, catalog.Marker))
+                .FirstOrDefault();
+            return match is null
+                ? live
+                : live with { Marker = live.Marker with { DisplayName = match.Marker.DisplayName } };
+        }).ToArray();
+        return SelectClosestDistinct(enrichedLive, catalogRiftgates, MaximumRiftgates);
+    }
+
+    private static Candidate[] SelectClosestDistinct(
+        IReadOnlyCollection<Candidate> livePoints,
+        IReadOnlyCollection<Candidate> catalogPoints,
+        int maximumCount)
+    {
+        var filteredCatalog = catalogPoints.Where(point =>
+            !livePoints.Any(livePoint => MarkerDistance(livePoint.Marker, point.Marker) <= 16));
+        var selected = new List<Candidate>(Math.Min(maximumCount, livePoints.Count + catalogPoints.Count));
+        foreach (var candidate in livePoints.Concat(filteredCatalog)
+                     .OrderBy(point => point.Distance)
+                     .ThenBy(point => IsLive(point.Marker) ? 0 : 1))
+        {
+            if (selected.Any(existing => MarkerDistance(existing.Marker, candidate.Marker) <= 16))
+                continue;
+            selected.Add(candidate);
+            if (selected.Count == maximumCount) break;
+        }
+        return selected.ToArray();
+    }
 
     private static bool QuestMatches(IReadOnlySet<string> active, string candidate)
     {

@@ -36,7 +36,7 @@ $files = foreach ($relative in $manifest) {
     }
     [pscustomobject]@{ Relative = $relative; Full = $full }
 }
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 if (Test-Path -LiteralPath $outputPath) { Remove-Item -LiteralPath $outputPath -Force }
 $archive = [IO.Compression.ZipFile]::Open($outputPath, [IO.Compression.ZipArchiveMode]::Create)
 try {

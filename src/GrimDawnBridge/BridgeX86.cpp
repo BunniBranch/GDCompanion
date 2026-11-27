@@ -158,7 +158,7 @@ namespace
                 sprintf_s(response, "ERROR INIT %lu", g_error.load());
                 Reply(pipe, response);
             }
-            else Reply(pipe, "PONG 38 READY CAPS=LUA_SYNC,UNLOAD,X86");
+            else Reply(pipe, "PONG 39 READY CAPS=LUA_SYNC,UNLOAD,X86");
             return;
         }
         if (!g_ready) { Reply(pipe, "ERROR NOT_READY"); return; }
@@ -244,13 +244,11 @@ namespace
                 else { g_hookEnabled = true; g_ready = true; }
             }
         }
-        HANDLE thread = CreateThread(nullptr, 0, PipeThread, nullptr, 0, nullptr);
-        if (thread) CloseHandle(thread);
-        return g_error.load();
+        return PipeThread(nullptr);
     }
 }
 
-extern "C" __declspec(dllexport) unsigned int GrimDawnCompanionBridgeVersion() { return 38; }
+extern "C" __declspec(dllexport) unsigned int GrimDawnCompanionBridgeVersion() { return 39; }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {

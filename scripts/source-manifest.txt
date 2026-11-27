@@ -43,6 +43,8 @@ src/GrimDawnBridge/README.md
 src/GrimDawnBridge/RadarCanvas.h
 src/GrimDawnBridge/RadarCanvasState.h
 src/GrimDawnBridge/RadarCanvasStateTests.cpp
+src/GrimDawnBridge/RestoredShrines.h
+src/GrimDawnBridge/RestoredShrinesTests.cpp
 src/GrimDawnBridge/SupportedBuilds.h
 src/GrimDawnCompanion.App/App.xaml
 src/GrimDawnCompanion.App/App.xaml.cs
@@ -68,6 +70,7 @@ src/GrimDawnCompanion.ConnectProbe/GrimDawnCompanion.ConnectProbe.csproj
 src/GrimDawnCompanion.ConnectProbe/Program.cs
 src/GrimDawnCompanion.Core/AffixLabels.cs
 src/GrimDawnCompanion.Core/ArcReader.cs
+src/GrimDawnCompanion.Core/ArzReader.cs
 src/GrimDawnCompanion.Core/BookmarkActivationGuard.cs
 src/GrimDawnCompanion.Core/BookmarkHotkey.cs
 src/GrimDawnCompanion.Core/BookmarkLocation.cs

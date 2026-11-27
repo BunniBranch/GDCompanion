@@ -40,6 +40,8 @@ public sealed record WorldPosition(float X, float Y, float Z);
 
 public sealed record LiveMapMarkerRecord(uint Type, WorldPosition Position, string? Label = null);
 
+public sealed record RestoredShrineState(IReadOnlySet<string> Uids, int? Difficulty);
+
 public sealed record PositionBookmark(Guid Id, string Name, DateTimeOffset CreatedAt, BookmarkLocation Location, string MapFingerprint)
 {
     public string? LocationName { get; init; }
@@ -64,7 +66,10 @@ public sealed record WorldMarkerRecord(
     QuestTargetBinding[]? QuestTargets = null,
     string[]? RequiredTokens = null,
     string[]? ExcludedTokens = null,
-    bool IsSpawnArea = false);
+    bool IsSpawnArea = false,
+    string? EntityUid = null,
+    byte DisabledDifficultiesMask = 0,
+    bool HideMapIcon = false);
 
 public sealed record QuestTargetBinding(string QuestPath, uint TaskUid);
 public sealed record QuestSpawnLink(string RecordPath, string[] RequiredTokens, string[] ExcludedTokens);

@@ -9,15 +9,20 @@ public sealed class PeExportReader
     private readonly List<Section> _sections = [];
     private readonly uint _exportRva;
 
+    public uint TimeDateStamp { get; }
+    public uint SizeOfImage { get; }
+
     public PeExportReader(string path)
     {
         _image = File.ReadAllBytes(path);
         if (_image.Length < 0x100 || U16(0) != 0x5a4d) throw new InvalidDataException("Not a valid PE image.");
         var pe = checked((int)U32(0x3c));
         if (U32(pe) != 0x00004550) throw new InvalidDataException("PE signature is missing.");
+        TimeDateStamp = U32(pe + 8);
         var sectionCount = U16(pe + 6);
         var optionalSize = U16(pe + 20);
         var optional = pe + 24;
+        SizeOfImage = U32(optional + 56);
         _exportRva = U16(optional) switch
         {
             0x20b => U32(optional + 112), // PE32+

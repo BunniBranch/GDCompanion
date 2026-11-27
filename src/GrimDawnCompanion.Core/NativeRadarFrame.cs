@@ -6,12 +6,16 @@ namespace GrimDawnCompanion.Core;
 
 public static class NativeRadarFrame
 {
-    public static IReadOnlyList<string> Commands(ulong context, IEnumerable<NavigationOverlayPoint> points)
+    private const int MaxTooltipChars = 48;
+    private const int MaxLabelUtf8Bytes = 192;
+
+    public static IReadOnlyList<string> Commands(ulong context, IEnumerable<NavigationOverlayPoint> points,
+        bool supportsTravelKind = true)
     {
         if (context == 0) throw new ArgumentOutOfRangeException(nameof(context));
         var markers = points.ToArray();
         if (markers.Length > 112) throw new ArgumentOutOfRangeException(nameof(points));
-        var commands = new List<string> { $"RADAR\tCANVAS\tBEGIN\t{context}\t{markers.Length}" };
+        var commands = new List<string> { string.Create(CultureInfo.InvariantCulture, $"RADAR\tCANVAS\tBEGIN\t{context}\t{markers.Length}") };
         const string prefix = "RADAR\tCANVAS\tADD";
         var batch = prefix;
         foreach (var point in markers)
@@ -20,23 +24,19 @@ public static class NativeRadarFrame
             if (!float.IsFinite(marker.WorldX) || !float.IsFinite(marker.WorldZ) ||
                 Math.Abs(marker.WorldX) > 1_000_000 || Math.Abs(marker.WorldZ) > 1_000_000)
                 throw new InvalidDataException("Invalid native radar position.");
-            var label = Regex.Replace(marker.DisplayName ?? marker.Category, @"\{[^}]*\}|[\p{Cc}\p{Cf}]", "");
-            label = label.Replace('^', ' ').Trim();
-            if (label.Length == 0) label = marker.Category;
-            if (marker.IsSpawnArea) label += " (possible spawn area)";
-            // Truncate at Unicode scalar boundaries, never halfway through UTF-8.
-            var bounded = new StringBuilder();
-            var bytes = 0;
-            foreach (var rune in label.EnumerateRunes())
-            {
-                if (bytes + rune.Utf8SequenceLength > 192) break;
-                bounded.Append(rune.ToString()); bytes += rune.Utf8SequenceLength;
-            }
-            var encoded = Convert.ToHexString(Encoding.UTF8.GetBytes(bounded.ToString()));
+            var encoded = Convert.ToHexString(Encoding.UTF8.GetBytes(FormatLabel(point)));
             var kind = marker.Category switch
             {
-                "Quest Objective" => 0, "Devotion Shrine" => 2, "Riftgate" or "Travel Utility" => 3,
-                "One-Shot Chest" => 4, "Vendor" or "Blacksmith" => 5, "Lore Note" => 6, _ => 1
+                "Quest Objective" => 0,
+                "Devotion Shrine" => 2,
+                "Riftgate" => 3,
+                "One-Shot Chest" => 4,
+                "Vendor" or "Blacksmith" => 5,
+                "Lore Note" => 6,
+                "Travel Utility" when !string.Equals(marker.RecordPath, "live://minimap/3", StringComparison.OrdinalIgnoreCase) =>
+                    supportsTravelKind ? 7 : 3,
+                "Travel Utility" => 3,
+                _ => 1
             };
             var entry = string.Create(CultureInfo.InvariantCulture, $"\t{marker.WorldX:R},{marker.WorldZ:R},{kind},{encoded}");
             if (batch.Length + entry.Length > 3500) { commands.Add(batch); batch = prefix; }
@@ -45,6 +45,70 @@ public static class NativeRadarFrame
         if (batch.Length > prefix.Length) commands.Add(batch);
         commands.Add("RADAR\tCANVAS\tCOMMIT");
         return commands;
+    }
+
+    private static string FormatLabel(NavigationOverlayPoint point)
+    {
+        var marker = point.Marker;
+        var label = Regex.Replace(marker.DisplayName ?? marker.Category, @"\{[^}]*\}|[\p{Cc}\p{Cf}]", "");
+        label = label.Replace('^', ' ').Trim();
+        if (label.Length == 0) label = marker.Category;
+        var distanceText = double.IsFinite(point.Distance) && point.Distance >= 0 && point.Distance < 1_000_000
+            ? string.Create(CultureInfo.InvariantCulture, $"{(int)Math.Round(point.Distance, MidpointRounding.AwayFromZero)}m")
+            : null;
+        var suffix = (marker.IsSpawnArea, distanceText) switch
+        {
+            (true, { } d) => $" (possible spawn area, {d})",
+            (true, null) => " (possible spawn area)",
+            (false, { } d) => $" ({d})",
+            _ => ""
+        };
+        var suffixBytes = Encoding.UTF8.GetByteCount(suffix);
+        if (label.Length + suffix.Length <= MaxTooltipChars &&
+            Encoding.UTF8.GetByteCount(label) + suffixBytes <= MaxLabelUtf8Bytes)
+            return label + suffix;
+
+        const string ellipsis = "\u2026";
+        var maxPrefixChars = Math.Max(0, MaxTooltipChars - ellipsis.Length - suffix.Length);
+        var maxPrefixBytes = Math.Max(0, MaxLabelUtf8Bytes - Encoding.UTF8.GetByteCount(ellipsis) - suffixBytes);
+        var bounded = new StringBuilder();
+        var chars = 0;
+        var bytes = 0;
+        foreach (var rune in label.EnumerateRunes())
+        {
+            if (chars + rune.Utf16SequenceLength > maxPrefixChars ||
+                bytes + rune.Utf8SequenceLength > maxPrefixBytes)
+                break;
+            bounded.Append(rune.ToString());
+            chars += rune.Utf16SequenceLength;
+            bytes += rune.Utf8SequenceLength;
+        }
+        return bounded.Append(ellipsis).Append(suffix).ToString();
+    }
+}
+
+/// <summary>A coherent native render frame covering the corner minimap, the full-screen map, or both under one region/session context.</summary>
+public sealed record NativeRadarSurfaceFrame(MinimapGeometry? Minimap, bool FullMapOpen, ulong RenderContext)
+{
+    public static NativeRadarSurfaceFrame? Parse(string response)
+    {
+        if (response == "OK RADAR_FRAME HIDDEN") return null;
+        var parts = response.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 4 && parts[0] == "OK" && parts[1] == "RADAR_FRAME" && parts[2] == "MAP")
+        {
+            if (!ulong.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var mapContext) || mapContext == 0)
+                throw new InvalidDataException("Invalid full-screen map render context.");
+            return new(null, true, mapContext);
+        }
+        if (parts.Length == 19 && parts[0] == "OK" && parts[1] == "RADAR_FRAME" && parts[2] == "MINIMAP" &&
+            (parts[3] == "0" || parts[3] == "1"))
+        {
+            var minimap = MinimapProjection.ParseFrame("OK MINIMAP_FRAME " + string.Join(" ", parts.Skip(4)))
+                ?? throw new InvalidDataException("Invalid radar minimap frame.");
+            if (minimap.RenderContext == 0) throw new InvalidDataException("Invalid radar render context.");
+            return new(minimap, parts[3] == "1", minimap.RenderContext);
+        }
+        throw new InvalidDataException("Invalid native radar frame.");
     }
 }
 

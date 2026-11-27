@@ -12,7 +12,7 @@ namespace MasteryRespec
     using ChangeRank = bool(__fastcall*)(void*, unsigned int);
     using AddPoints = void(__fastcall*)(void*, unsigned int);
     inline ReadList skills = nullptr, itemSkills = nullptr;
-    inline ReadUnsigned rank = nullptr, owner = nullptr, devotionSpent = nullptr;
+    inline ReadUnsigned rank = nullptr, owner = nullptr, devotionSpent = nullptr, nativeDevotionSpent = nullptr;
     inline ReadUnsigned devotionPoints = nullptr, devotionTotal = nullptr, devotionMax = nullptr;
     using ReadAffinity = unsigned int(__fastcall*)(void*, unsigned int);
     inline ReadAffinity affinity = nullptr;
@@ -49,6 +49,25 @@ namespace MasteryRespec
     inline char lastResult[1024] = "ERROR MASTERY_NO_TRANSACTION";
     inline char recordedResult[1024] = "ERROR MASTERY_NO_TRANSACTION";
 
+    // Game.dll's GetNumDevotionPointsSpent() calls Skill::vtable[0x1C8], which
+    // returns Celestial Power XP level (+0xD0) when > 1 instead of invested
+    // points (+0xC8). Sum Skill::GetSkillLevel() for devotion skills (+0x4A0 != 0).
+    inline unsigned int __fastcall ReadDevotionSpent(void* manager)
+    {
+        if (!manager || !skills || !rank) return 0;
+        const auto list = skills(manager);
+        const auto count = MasteryGameUi::Count(list);
+        if (count > 4096) return 0;
+        unsigned int total = 0;
+        for (size_t i = 0; i < count; ++i)
+        {
+            auto skill = list->begin[i];
+            if (skill && *reinterpret_cast<const unsigned int*>(static_cast<const unsigned char*>(skill) + 0x4A0) != 0)
+                total += rank(skill);
+        }
+        return total;
+    }
+
     inline void Initialize(HMODULE engine, HMODULE game)
     {
         Bind(skills, game, "?GetSkillList@SkillManager@GAME@@QEBAAEBV?$vector@PEAVSkill@GAME@@@mem@@XZ");
@@ -58,7 +77,8 @@ namespace MasteryRespec
         Bind(isMastery, game, "?IsSkillTheMasterySkill@Skill@GAME@@QEBA?B_NXZ");
         Bind(isDefault, game, "?IsDefaultSkill@SkillManager@GAME@@QEBA_NI@Z");
         Bind(entrySet, game, "?GetSkillSet@Skill@GAME@@QEBAHXZ");
-        Bind(devotionSpent, game, "?GetNumDevotionPointsSpent@SkillManager@GAME@@QEBAIXZ");
+        Bind(nativeDevotionSpent, game, "?GetNumDevotionPointsSpent@SkillManager@GAME@@QEBAIXZ");
+        devotionSpent = &ReadDevotionSpent;
         Bind(devotionPoints, game, "?GetDevotionPoints@Character@GAME@@QEBA?BIXZ");
         Bind(devotionTotal, game, "?GetTotalDevotionPoints@Character@GAME@@QEBA?BIXZ");
         Bind(devotionMax, game, "?GetMaxDevotionPoints@Character@GAME@@QEBA?BIXZ");
@@ -72,7 +92,7 @@ namespace MasteryRespec
         Bind(decrement, game, "?DecrementSkillLevel@Skill@GAME@@UEAA_NI@Z");
         Bind(refund, game, "?AddSkillPoints@Character@GAME@@QEAAXI@Z");
         available = MasteryAudit::available && skills && itemSkills && rank && owner && isMastery &&
-            isDefault && entrySet && devotionSpent && devotionPoints && devotionTotal && devotionMax && affinity &&
+            isDefault && entrySet && nativeDevotionSpent && devotionSpent && devotionPoints && devotionTotal && devotionMax && affinity &&
             MasteryGameUi::available && engineInstance && gameInfo && singlePlayer && alive && attacked && decrement && refund;
     }
 
